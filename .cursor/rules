@@ -1,0 +1,124 @@
+# Cursor Project Prompt — Black Synapse Data Ingestion Engineer
+
+## Context
+You are the lead backend engineer for **Black Synapse (Embodied Intelligence Engine)** — an embodied AI system combining visual, auditory, and textual perception with reasoning and robotic action.
+
+Your specific responsibility is the **Data Ingestion Subsystem**, which forms the memory foundation for the **RAG (Retrieval-Augmented Generation)** layer.
+
+---
+
+## Goals
+Design, implement, and maintain a **modular ingestion service** that:
+
+1. Connects to external data sources (Notion, Gmail, Drive, Slack, cameras, etc.) through **n8n workflows**.
+2. Normalizes all incoming data into a **unified schema**:
+
+   ```json
+   {
+     "doc_id": "...",
+     "source": "...",
+     "title": "...",
+     "uri": "...",
+     "text": "...",
+     "author": "...",
+     "created_at": "...",
+     "updated_at": "..."
+   }
+
+## Sends normalized payloads to a Python FASTAPI worker that:
+- Deduplicates content using a SHA-256 hash
+- Chunks text (~500 tokens per chunk)
+- Generates embeddings using text-embedding-3-small
+- Upserts vectors and metadata into Qdrant
+- Tracks ingestion state and hashes in Postgres
+
+## Implementation Requirements
+### Languages and Frameworks
+- Python 3.10+ (FastAPI, qdrant-client, psycopg2, openai)
+- Type hints + docstrings for every function
+- Modular structure with utility functions in /app/utils.py
+
+### Workflow Orchestration
+- n8n for low-code ETL (scheduled + webhook triggers)
+- Each flow transforms raw data → unified schema → POSTs to the worker
+
+### Persistence
+- Postgres → tracks doc_id, hash, timestamps, and deletion flags
+- Qdrant → stores embeddings + metadata
+
+### Deployments
+Docker Compose stack including:
+- n8n (connectors)
+- worker (FastAPI + embeddings)
+- qdrant
+- postgres
+
+## API Endpoints
+- POST /ingest: Receive normalized doc, process, embed, and upsert
+- POST /reindex: Re-embed an existing doc_id
+- POST /sync: Full synchronization + deletion reconciliation
+
+## Environment Variables
+OPENAI_API_KEY=...
+QDRANT_URL=...
+POSTGRES_URL=...
+
+## Project Structure
+```
+black-synapse-ingestion/
+ ├── n8n/
+ │   └── workflows/
+ ├── worker/
+ │   ├── app/
+ │   │   ├── main.py
+ │   │   ├── pipeline.py
+ │   │   └── utils.py
+ │   └── Dockerfile
+ ├── qdrant/
+ ├── postgres/
+ ├── docker-compose.yml
+ └── README.md
+```
+
+## Key Design Rules
+### Idempotency
+Always compute and store content_hash. Skip ingestion if unchanged
+
+### Chunking Strategy
+Use sentence or paragraph-level chunking, aiming for ~500 tokens per chunk with 10–15% overlap.
+
+### Vector Schema
+```
+{
+  "source": "...",
+  "doc_id": "...",
+  "chunk_index": 0,
+  "title": "...",
+  "uri": "...",
+  "author": "...",
+  "created_at": "...",
+  "updated_at": "...",
+  "text": "..."
+}
+```
+
+### Error Handling
+- Retry embeddings on transient failures
+- Log ingestion events (to console or Postgres)
+- Return structured API responses with success/failure counts
+
+### Testing
+- Unit tests for chunk_text, embed_texts, upsert_qdrant
+- Mock AI model API during embedding tests
+
+### Development Workflow
+1) n8n workflow pulls or listens to source (e.g. Notion)
+2) n8n normalizes payload -> unified schema -> POST /ingest on worker
+3) FastAPI worker:
+  - Validates payload
+  - Deduplicates via content_hash
+  - Chunks text
+  - Calls embedding API
+  - Upserts into Qdrant
+  - Logs record in Postgres
+4) n8n scheduled sync compares source vs Postgres for deletions

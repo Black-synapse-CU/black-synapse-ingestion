@@ -1,0 +1,173 @@
+{
+  "name": "Gmail to Black Synapse Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 */6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 50,
+        "simple": false,
+        "options": {
+          "query": "is:unread OR is:important",
+          "includeSpamTrash": false
+        }
+      },
+      "id": "fetch-emails",
+      "name": "Fetch Recent Emails",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process each email and normalize data\nconst emails = $input.all();\nconst normalizedEmails = [];\n\nfor (const email of emails) {\n  const emailData = email.json;\n  \n  // Extract text content from email body\n  let textContent = '';\n  if (emailData.textPlain) {\n    textContent = emailData.textPlain;\n  } else if (emailData.textHtml) {\n    // Simple HTML stripping (in production, use a proper HTML parser)\n    textContent = emailData.textHtml\n      .replace(/<[^>]*>/g, ' ')\n      .replace(/\\s+/g, ' ')\n      .trim();\n  }\n  \n  // Skip if no text content\n  if (!textContent || textContent.length < 10) {\n    continue;\n  }\n  \n  // Extract sender name\n  let author = 'Unknown';\n  if (emailData.from) {\n    const fromMatch = emailData.from.match(/^(.+?)\\s*<(.+)>$/);\n    if (fromMatch) {\n      author = fromMatch[1].trim().replace(/^\"|\"$/g, '');\n    } else {\n      author = emailData.from.split('@')[0];\n    }\n  }\n  \n  // Create normalized document payload\n  const normalizedDoc = {\n    doc_id: `gmail_${emailData.id}`,\n    source: 'gmail',\n    title: emailData.subject || 'No Subject',\n    uri: `https://mail.google.com/mail/u/0/#inbox/${emailData.id}`,\n    text: textContent,\n    author: author,\n    created_at: emailData.date,\n    updated_at: emailData.date\n  };\n  \n  normalizedEmails.push({ json: normalizedDoc });\n}\n\nreturn normalizedEmails;"
+      },
+      "id": "normalize-emails",
+      "name": "Normalize Email Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://worker:8000/ingest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "doc_id",
+              "value": "={{ $json.doc_id }}"
+            },
+            {
+              "name": "source",
+              "value": "={{ $json.source }}"
+            },
+            {
+              "name": "title",
+              "value": "={{ $json.title }}"
+            },
+            {
+              "name": "uri",
+              "value": "={{ $json.uri }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.text }}"
+            },
+            {
+              "name": "author",
+              "value": "={{ $json.author }}"
+            },
+            {
+              "name": "created_at",
+              "value": "={{ $json.created_at }}"
+            },
+            {
+              "name": "updated_at",
+              "value": "={{ $json.updated_at }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "send-to-worker",
+      "name": "Send to Ingestion Worker",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log processing results\nconst results = $input.all();\nlet successCount = 0;\nlet errorCount = 0;\n\nfor (const result of results) {\n  if (result.json.success) {\n    successCount++;\n  } else {\n    errorCount++;\n  }\n}\n\nconsole.log(`Gmail sync completed: ${successCount} successful, ${errorCount} errors`);\n\nreturn { json: { success: true, processed: successCount, errors: errorCount } };"
+      },
+      "id": "log-results",
+      "name": "Log Processing Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Recent Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Recent Emails": {
+      "main": [
+        [
+          {
+            "node": "Normalize Email Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Email Data": {
+      "main": [
+        [
+          {
+            "node": "Send to Ingestion Worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Ingestion Worker": {
+      "main": [
+        [
+          {
+            "node": "Log Processing Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "id": "gmail-sync",
+  "tags": []
+}

@@ -1,0 +1,247 @@
+{
+  "name": "Notion to Black Synapse Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "notion-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Notion Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "notion-sync-webhook"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-1",
+              "leftValue": "={{ $json.event_type }}",
+              "rightValue": "page.created",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "condition-2",
+              "leftValue": "={{ $json.event_type }}",
+              "rightValue": "page.updated",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "filter-events",
+      "name": "Filter Page Events",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.notion.com/v1/pages/{{ $json.data.page_id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "options": {
+          "headers": {
+            "Notion-Version": "2022-06-28"
+          }
+        }
+      },
+      "id": "fetch-page",
+      "name": "Fetch Page Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.notion.com/v1/blocks/{{ $json.id }}/children",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "notionApi",
+        "options": {
+          "headers": {
+            "Notion-Version": "2022-06-28"
+          }
+        }
+      },
+      "id": "fetch-content",
+      "name": "Fetch Page Content",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and normalize Notion page data\nconst page = $input.first().json;\nconst content = $input.last().json;\n\n// Extract title from page properties\nlet title = 'Untitled';\nif (page.properties.title && page.properties.title.title) {\n  title = page.properties.title.title[0]?.plain_text || 'Untitled';\n} else if (page.properties.Name && page.properties.Name.title) {\n  title = page.properties.Name.title[0]?.plain_text || 'Untitled';\n}\n\n// Extract text content from blocks\nlet textContent = '';\nif (content.results) {\n  textContent = content.results\n    .filter(block => block.type === 'paragraph' || block.type === 'heading_1' || block.type === 'heading_2' || block.type === 'heading_3')\n    .map(block => {\n      if (block.paragraph) {\n        return block.paragraph.rich_text.map(rt => rt.plain_text).join('');\n      } else if (block.heading_1) {\n        return block.heading_1.rich_text.map(rt => rt.plain_text).join('');\n      } else if (block.heading_2) {\n        return block.heading_2.rich_text.map(rt => rt.plain_text).join('');\n      } else if (block.heading_3) {\n        return block.heading_3.rich_text.map(rt => rt.plain_text).join('');\n      }\n      return '';\n    })\n    .join('\\n\\n');\n}\n\n// Extract author (if available)\nlet author = 'Unknown';\nif (page.created_by && page.created_by.name) {\n  author = page.created_by.name;\n}\n\n// Create normalized document payload\nconst normalizedDoc = {\n  doc_id: `notion_${page.id}`,\n  source: 'notion',\n  title: title,\n  uri: page.url || `https://notion.so/${page.id}`,\n  text: textContent,\n  author: author,\n  created_at: page.created_time,\n  updated_at: page.last_edited_time\n};\n\nreturn { json: normalizedDoc };"
+      },
+      "id": "normalize-data",
+      "name": "Normalize Document Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://worker:8000/ingest",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "doc_id",
+              "value": "={{ $json.doc_id }}"
+            },
+            {
+              "name": "source",
+              "value": "={{ $json.source }}"
+            },
+            {
+              "name": "title",
+              "value": "={{ $json.title }}"
+            },
+            {
+              "name": "uri",
+              "value": "={{ $json.uri }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.text }}"
+            },
+            {
+              "name": "author",
+              "value": "={{ $json.author }}"
+            },
+            {
+              "name": "created_at",
+              "value": "={{ $json.created_at }}"
+            },
+            {
+              "name": "updated_at",
+              "value": "={{ $json.updated_at }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "send-to-worker",
+      "name": "Send to Ingestion Worker",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"success\": true, \"message\": \"Document processed successfully\", \"doc_id\": $json.doc_id } }}"
+      },
+      "id": "webhook-response",
+      "name": "Webhook Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1560, 300]
+    }
+  ],
+  "connections": {
+    "Notion Webhook": {
+      "main": [
+        [
+          {
+            "node": "Filter Page Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Page Events": {
+      "main": [
+        [
+          {
+            "node": "Fetch Page Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Page Details": {
+      "main": [
+        [
+          {
+            "node": "Fetch Page Content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Page Content": {
+      "main": [
+        [
+          {
+            "node": "Normalize Document Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Document Data": {
+      "main": [
+        [
+          {
+            "node": "Send to Ingestion Worker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send to Ingestion Worker": {
+      "main": [
+        [
+          {
+            "node": "Webhook Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "1",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "id": "notion-sync",
+  "tags": []
+}
