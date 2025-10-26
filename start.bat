@@ -45,43 +45,43 @@ echo 🔍 Checking service health...
 REM Check worker health
 curl -f http://localhost:8000/health >nul 2>&1
 if errorlevel 1 (
-    echo ⚠️  Worker service is not responding yet. It may take a few more minutes to start.
+    echo  Worker service is not responding yet. It may take a few more minutes to start.
 ) else (
-    echo ✅ Worker service is healthy
+    echo Worker service is healthy
 )
 
 REM Check PostgreSQL
 docker-compose exec -T postgres pg_isready -U postgres >nul 2>&1
 if errorlevel 1 (
-    echo ⚠️  PostgreSQL is not ready yet
+    echo PostgreSQL is not ready yet
 ) else (
-    echo ✅ PostgreSQL is ready
+    echo PostgreSQL is ready
 )
 
 REM Check Qdrant
-curl -f http://localhost:6333/health >nul 2>&1
+curl -f http://localhost:6333/collections >nul 2>&1
 if errorlevel 1 (
-    echo ⚠️  Qdrant is not ready yet
+    echo Qdrant is not ready yet
 ) else (
-    echo ✅ Qdrant is ready
+    echo Qdrant is ready
 )
 
 echo.
-echo 🎉 Black Synapse Data Ingestion System is starting up!
+echo Black Synapse Data Ingestion System is starting up!
 echo.
-echo 📊 Service URLs:
+echo Service URLs:
 echo    • Worker API: http://localhost:8000
 echo    • API Docs: http://localhost:8000/docs
 echo    • n8n Interface: http://localhost:5678
 echo    • Qdrant Dashboard: http://localhost:6333/dashboard
 echo.
-echo 📝 Next steps:
+echo Next steps:
 echo    1. Configure your OpenAI API key in .env
 echo    2. Import n8n workflows from n8n/workflows/
 echo    3. Set up data source integrations
 echo    4. Test the API endpoints
 echo.
-echo 📚 For more information, see README.md
+echo For more information, see README.md
 echo.
 echo To view logs: docker-compose logs -f
 echo To stop services: docker-compose down

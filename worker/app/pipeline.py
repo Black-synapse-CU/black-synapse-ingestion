@@ -62,24 +62,37 @@ class IngestionPipeline:
     
     async def _ensure_qdrant_collection(self):
         """Ensure Qdrant collection exists with proper configuration."""
-        try:
-            collections = self.qdrant_client.get_collections()
-            collection_names = [col.name for col in collections.collections]
-            
-            if self.collection_name not in collection_names:
-                self.qdrant_client.create_collection(
-                    collection_name=self.collection_name,
-                    vectors_config=VectorParams(
-                        size=1536,  # text-embedding-3-small dimension
-                        distance=Distance.COSINE
+        # Retry loop: Qdrant may not be ready when the worker container starts.
+        max_attempts = 10
+        delay = 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                collections = self.qdrant_client.get_collections()
+                collection_names = [col.name for col in collections.collections]
+
+                if self.collection_name not in collection_names:
+                    self.qdrant_client.create_collection(
+                        collection_name=self.collection_name,
+                        vectors_config=VectorParams(
+                            size=1536,  # text-embedding-3-small dimension
+                            distance=Distance.COSINE
+                        )
                     )
-                )
-                logger.info(f"Created Qdrant collection: {self.collection_name}")
-            else:
-                logger.info(f"Qdrant collection already exists: {self.collection_name}")
-        except Exception as e:
-            logger.error(f"Failed to ensure Qdrant collection: {e}")
-            raise
+                    logger.info(f"Created Qdrant collection: {self.collection_name}")
+                else:
+                    logger.info(f"Qdrant collection already exists: {self.collection_name}")
+
+                # Success - exit retry loop
+                return
+
+            except Exception as e:
+                logger.warning(f"Attempt {attempt}/{max_attempts} - failed to contact Qdrant: {e}")
+                if attempt == max_attempts:
+                    logger.error(f"Failed to ensure Qdrant collection after {max_attempts} attempts: {e}")
+                    raise
+                # Exponential backoff with cap
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 10)
     
     async def _ensure_postgres_tables(self):
         """Ensure Postgres tables exist with proper schema."""

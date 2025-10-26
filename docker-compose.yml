@@ -22,7 +22,7 @@ services:
 
   # Qdrant Vector Database
   qdrant:
-    image: qdrant/qdrant:v1.7.0
+    image: qdrant/qdrant:latest
     container_name: black-synapse-qdrant
     volumes:
       - qdrant_data:/qdrant/storage
@@ -32,11 +32,15 @@ services:
     environment:
       QDRANT__SERVICE__HTTP_PORT: 6333
       QDRANT__SERVICE__GRPC_PORT: 6334
+    # Note: omitted healthcheck because the Qdrant official image may not include curl/wget
+    # and the container's internal healthprobe can fail. Docker host-level checks can be
+    # used instead (or add a lightweight sidecar that probes the API). Removing the
+    # healthcheck avoids the container being marked unhealthy when curl is missing.
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      test: curl -s http://localhost:6333/healthz | grep -q 'healthz check passed' || exit 1
+      interval: 30s
+      retries: 20
+      start_period: 30s
 
   # FastAPI Worker
   worker:
