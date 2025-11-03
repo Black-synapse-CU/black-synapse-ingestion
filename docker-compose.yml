@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -32,15 +30,9 @@ services:
     environment:
       QDRANT__SERVICE__HTTP_PORT: 6333
       QDRANT__SERVICE__GRPC_PORT: 6334
-    # Note: omitted healthcheck because the Qdrant official image may not include curl/wget
-    # and the container's internal healthprobe can fail. Docker host-level checks can be
-    # used instead (or add a lightweight sidecar that probes the API). Removing the
-    # healthcheck avoids the container being marked unhealthy when curl is missing.
-    healthcheck:
-      test: curl -s http://localhost:6333/healthz | grep -q 'healthz check passed' || exit 1
-      interval: 30s
-      retries: 20
-      start_period: 30s
+    # No container-level healthcheck here because the official image may not include
+    # curl/wget. Compose-level readiness will be handled by start scripts and the
+    # worker will retry connections to Qdrant on startup.
 
   # FastAPI Worker
   worker:
@@ -56,12 +48,11 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
+      - postgres
+      - qdrant
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # Use Python builtin to avoid requiring curl in the image
+      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

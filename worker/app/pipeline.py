@@ -18,6 +18,7 @@ from datetime import datetime
 import json
 
 import openai
+import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 import psycopg2
@@ -33,7 +34,11 @@ class IngestionPipeline:
     
     def __init__(self):
         """Initialize the ingestion pipeline with database connections."""
-        self.openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        # Create an httpx client explicitly and pass it to OpenAI to avoid
+        # compatibility issues between openai library's expected httpx kwargs
+        # and the httpx version provided in the image.
+        httpx_client = httpx.Client()
+        self.openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=httpx_client)
         self.qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL"))
         self.postgres_url = os.getenv("POSTGRES_URL")
         
@@ -42,6 +47,29 @@ class IngestionPipeline:
         
         # Collection name for Qdrant
         self.collection_name = "black_synapse_documents"
+        
+        #Embedding model and vector dimension (configurable via env)
+        # Supported models:
+        # - text-embedding-3-small => 1536 dims (default)
+        # - text-embedding-3-large => 3072 dims
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        # Allow explicit override of embedding dimension if necessary
+        model_dim_override = os.getenv("EMBEDDING_DIM")
+        if model_dim_override:
+            try:
+                self.embedding_dim = int(model_dim_override)
+            except ValueError:
+                logger.warning("Invalid EMBEDDING_DIM value '%s', falling back to model default", model_dim_override)
+                self.embedding_dim = 1536
+        else:
+            # Map common model names to dimensions
+            if self.embedding_model == "text-embedding-3-large":
+                self.embedding_dim = 3072
+            else:
+                # Default to small model dims
+                self.embedding_dim = 1536
+        logger.info(f"Using embedding model: %s (dim=%d)", self.embedding_model, self.embedding_dim)
+
         
         # Initialize collections and database
         asyncio.create_task(self._initialize())
@@ -74,7 +102,7 @@ class IngestionPipeline:
                     self.qdrant_client.create_collection(
                         collection_name=self.collection_name,
                         vectors_config=VectorParams(
-                            size=1536,  # text-embedding-3-small dimension
+                            size=self.embedding_dim,
                             distance=Distance.COSINE
                         )
                     )
@@ -228,9 +256,9 @@ class IngestionPipeline:
             chunks = chunk_text(document.text, self.tokenizer)
             logger.info(f"Chunked document {document.doc_id} into {len(chunks)} chunks")
             
-            # Generate embeddings for all chunks
+            # Generate embeddings for all chunks (use configured model)
             chunk_texts = [chunk["text"] for chunk in chunks]
-            embeddings = await get_embedding(chunk_texts, self.openai_client)
+            embeddings = await get_embedding(chunk_texts, self.openai_client, model=self.embedding_model)
             
             # Prepare points for Qdrant
             points = []
@@ -395,3 +423,8 @@ class IngestionPipeline:
                 "documents_deleted": 0,
                 "errors": [str(e)]
             }
+        
+    #verify the embeddings
+    qc = QdrantClient(url=os.getenv("QDRANT_URL"))
+    collections = qc.get_collections()
+    print(collections)  # inspect vectors_config.size or collection metadata
