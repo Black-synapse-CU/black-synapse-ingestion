@@ -17,6 +17,7 @@ services:
       - n8n_data:/home/node/.n8n
     depends_on:
       - qdrant
+      - ollama
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -38,6 +39,8 @@ services:
           - driver: nvidia
             capabilities: ["gpu"]
             count: all  
+
+    # Postgres for chat memory
 
 volumes:
   n8n_data:
