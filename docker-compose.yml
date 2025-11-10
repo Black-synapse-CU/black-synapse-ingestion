@@ -18,6 +18,7 @@ services:
     depends_on:
       - qdrant
       - ollama
+      - piper
 
   qdrant:
     image: qdrant/qdrant:latest
@@ -41,6 +42,12 @@ services:
             count: all  
 
     # Postgres for chat memory
+
+    # TTS
+
+    # 
+
+
 
 volumes:
   n8n_data:
