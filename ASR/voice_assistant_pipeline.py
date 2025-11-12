@@ -1,27 +1,6 @@
-### asr_handler.py
-# ASR module using whisper.cpp
-
-import subprocess
-
-def transcribe(audio_path="utterance.wav", model="base.en"):
-    try:
-        cmd = [
-            "./main",  # Path to whisper.cpp binary
-            "-m", f"models/ggml-{model}.bin",
-            "-f", audio_path,
-            "-otxt",
-            "-of", "result"
-        ]
-        subprocess.run(cmd, check=True)
-        with open("result.txt", "r") as f:
-            return f.read().strip()
-    except Exception as e:
-        print("[ASR Error]", e)
-        return "(transcription failed)"
-
-
 ### voice_trigger.py
 # Handles wake word detection + VAD-based recording
+# Continuously listens for "Jarvis" wake word and records audio after detection
 
 import os
 from dotenv import load_dotenv
@@ -42,7 +21,6 @@ VAD_FRAME_DURATION_MS = 30
 VAD_FRAME_SIZE = int(SAMPLE_RATE * VAD_FRAME_DURATION_MS / 1000)
 SILENCE_FRAMES = int(800 / VAD_FRAME_DURATION_MS)
 OUTPUT_WAV = "utterance.wav"
-WHISPER_MODEL = "base.en"
 
 def is_speech(frame, vad):
     return vad.is_speech(frame.tobytes(), SAMPLE_RATE)
@@ -102,11 +80,8 @@ def record_after_wake():
                     wf.writeframes(audio.tobytes())
 
                 print(f"[Audio saved to {OUTPUT_WAV}]")
-
-                transcript = transcribe(audio_path=OUTPUT_WAV, model=WHISPER_MODEL)
-                print(f"[Transcript]: {transcript}\n")
-
-                break
+                print("[Resuming wake word detection...]\n")
+                # Continue listening for next wake word (don't break)
     finally:
         stream.stop()
         stream.close()
