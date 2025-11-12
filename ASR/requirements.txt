@@ -2,3 +2,4 @@ pvporcupine
 sounddevice 
 webrtcvad 
 numpy
+python-dotenv
