@@ -1,51 +1,80 @@
-from fastapi import FastAPI, Request, HTTPException
-import uvicorn
 import tempfile
 import os
+import wave
+import platform
 import subprocess
 import traceback
 
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from piper import PiperVoice
+import uvicorn
+
 app = FastAPI()
 
-def play_mp3(path: str):
-    """Play an mp3 file from disk, then return."""
-    if os.name == "nt":  # Windows
-        os.startfile(path)
-    else:  # Linux / Jetson
-        # needs: sudo apt install mpg123  (or use ffplay below)
-        try:
-            subprocess.run(["mpg123", path], check=True)
-        except FileNotFoundError:
-            # fallback to ffplay if mpg123 not installed
-            subprocess.run(["ffplay", "-nodisp", "-autoexit", path], check=True)
+MODEL_PATH =  r"C:\Users\Elyas\OneDrive - The University of Colorado Denver\Desktop\projects\black-synapse-ingestion\TTS\en_US-lessac-medium.onnx"
+
+VOICE: PiperVoice | None = None
 
 
-@app.post("/play")
-async def play(request: Request):
-    # read raw mp3 bytes from body
-    audio_bytes = await request.body()
-    if not audio_bytes:
-        raise HTTPException(status_code=400, detail="No audio data received")
+class TTSRequest(BaseModel):
+    text: str
 
-    # make temp mp3
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp:
+
+def play_wav(path: str):
+    system = platform.system().lower()
+    if "windows" in system:
+        import winsound
+        winsound.PlaySound(path, winsound.SND_FILENAME)
+    else:
+        subprocess.run(["aplay", path], check=True)
+
+
+@app.on_event("startup")
+def load_voice():
+    global VOICE
+    try:
+        use_cuda = True
+        VOICE = PiperVoice.load(MODEL_PATH, use_cuda=use_cuda)
+        print(f"Piper model loaded on {'GPU' if use_cuda else 'CPU'}")
+    except Exception as e:
+        print("Failed to load Piper model:", e)
+        traceback.print_exc()
+        # let it start anyway, but endpoints will 500
+        VOICE = None
+
+
+@app.post("/tts")
+def tts(req: TTSRequest):
+    if VOICE is None:
+        raise HTTPException(status_code=500, detail="Voice model not loaded")
+
+    # make temp wav
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         tmp_path = tmp.name
-        tmp.write(audio_bytes)
+
+    # synthesize
+    try:
+        with wave.open(tmp_path, "wb") as wav_file:
+            VOICE.synthesize_wav(req.text, wav_file)
+    except Exception as e:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        print("TTS failed:", e)
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
 
     # play
     try:
-        play_mp3(tmp_path)
+        play_wav(tmp_path)
     except Exception as e:
-        # clean up
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        os.remove(tmp_path)
         print("Playback failed:", e)
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Playback failed: {e}")
 
-    # delete after successful play
     os.remove(tmp_path)
-    return {"status": "played", "bytes": len(audio_bytes)}
+    return {"status": "played", "text": req.text}
 
 
 if __name__ == "__main__":
