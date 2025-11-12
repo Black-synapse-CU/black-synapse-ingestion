@@ -1,3 +1,4 @@
-pvporcupine
-pyaudio 
-requests
+pvporcupine 
+sounddevice 
+webrtcvad 
+numpy

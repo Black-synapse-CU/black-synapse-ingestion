@@ -1,31 +1,62 @@
 import pvporcupine
+import webrtcvad
 import sounddevice as sd
-from whisper_cpp import Whisper
+import numpy as np
+import collections
+import time
+import wave
 
-# Set up wake word
+# --- Config ---
+SAMPLE_RATE = 16000
+FRAME_DURATION_MS = 30  # 30 ms
+FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)
+SILENCE_TIMEOUT_MS = 800  # Stop if this long silence
+SILENCE_FRAMES = int(SILENCE_TIMEOUT_MS / FRAME_DURATION_MS)
+
+# --- Wake Word ---
 porcupine = pvporcupine.create(keywords=["jarvis"])
-audio_stream = sd.InputStream(samplerate=16000, channels=1, dtype='int16')
-audio_stream.start()
+vad = webrtcvad.Vad(2)  # Aggressiveness: 0–3
 
-# Load Whisper
-asr = Whisper(model_path="models/base.en")
+# --- Audio ---
+stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=FRAME_SIZE)
+stream.start()
 
-print("Listening...")
+print("Listening for 'Jarvis'...")
+
+def is_speech(frame):
+    return vad.is_speech(frame.tobytes(), SAMPLE_RATE)
 
 while True:
-    pcm = audio_stream.read(512)[0]
-    pcm = pcm.flatten().tolist()
+    # Wake word loop
+    pcm = stream.read(FRAME_SIZE)[0].flatten()
+    keyword_index = porcupine.process(pcm.tolist())
 
-    keyword_index = porcupine.process(pcm)
     if keyword_index >= 0:
-        print("Wake word detected! Listening for command...")
-        recorded_audio = []  # Start capturing audio here
+        print("Wake word detected! Start speaking...")
 
-        # Record for N seconds
-        for _ in range(0, 16000 * 3 // 512):
-            frame = audio_stream.read(512)[0].flatten().tolist()
-            recorded_audio.extend(frame)
+        frames = []
+        silence_counter = 0
 
-        # Transcribe
-        text = asr.transcribe(recorded_audio)
-        print(f"Transcribed: {text}")
+        while True:
+            frame = stream.read(FRAME_SIZE)[0].flatten()
+            frames.append(frame)
+
+            if is_speech(frame):
+                silence_counter = 0
+            else:
+                silence_counter += 1
+                if silence_counter > SILENCE_FRAMES:
+                    print("End of speech.")
+                    break
+
+        # Combine frames and pass to ASR
+        audio_np = np.concatenate(frames).astype(np.int16)
+
+        # Optional: save to WAV for testing
+        with wave.open("utterance.wav", 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(SAMPLE_RATE)
+            wf.writeframes(audio_np.tobytes())
+
+        print("Saved utterance.wav")
