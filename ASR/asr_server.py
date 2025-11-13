@@ -1,114 +1,70 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from typing import List
-import subprocess
+from fastapi import FastAPI, Request, HTTPException
 from pathlib import Path
-import os
+from datetime import datetime
+import logging
 import uvicorn
+import wave
+import whisper
+import numpy as np  # make sure: pip install numpy
 
 app = FastAPI()
 
-# Configure paths to whisper.cpp and model
-WHISPER_BIN = os.getenv("WHISPER_BIN", "/usr/local/bin/whisper")  # e.g. /home/elyas/whisper.cpp/main
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "/models/ggml-base.en.bin")
+SAVE_DIR = Path("received_audio")
+SAVE_DIR.mkdir(exist_ok=True)
 
-# Extra default args (tweak as you like)
-WHISPER_ARGS = [
-    "-l", "en",  # force English; remove/change if you want auto or other language
-    "-nt"        # no timestamps; remove if you WANT timestamps in output
-]
+logging.basicConfig(level=logging.INFO)
 
-
-class FileEvent(BaseModel):
-    event: str
-    path: str
+MODEL = whisper.load_model("base")  # or "tiny", "small", etc.
 
 
 @app.post("/transcribe")
-async def transcribe(events: List[FileEvent]):
-    """
-    Accepts a list of file change events like:
-    [
-      {
-        "event": "change",
-        "path": "/data/asr/utterance.wav"
-      }
-    ]
+async def transcribe(request: Request):
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="No audio data received")
 
-    For each event, runs whisper.cpp on the given path and returns transcriptions.
-    """
-    if not events:
-        raise HTTPException(status_code=400, detail="No events provided")
-
-    results = []
-
-    for ev in events:
-        audio_path = Path(ev.path)
-
-        if not audio_path.suffix.lower() == ".wav":
-            # You can relax this if you want to support other formats
-            raise HTTPException(
-                status_code=400,
-                detail=f"Only .wav files are supported (got: {audio_path})"
-            )
-
-        if not audio_path.exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"Audio file not found at path: {audio_path}"
-            )
-
-        try:
-            text = run_whisper_on_wav(audio_path)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
-
-        results.append({
-            "event": ev.event,
-            "path": ev.path,
-            "text": text
-        })
-
-    # If you only ever send one event, this will just be a single-item list
-    return JSONResponse(results)
-
-
-def run_whisper_on_wav(wav_path: Path) -> str:
-    """
-    Call whisper.cpp on a WAV file and return the transcribed text.
-    """
-    if not Path(WHISPER_BIN).exists():
-        raise RuntimeError(f"whisper binary not found at {WHISPER_BIN}")
-
-    if not Path(WHISPER_MODEL).exists():
-        raise RuntimeError(f"whisper model not found at {WHISPER_MODEL}")
-
-    cmd = [
-        str(WHISPER_BIN),
-        "-m", str(WHISPER_MODEL),
-        "-f", str(wav_path),
-        *WHISPER_ARGS,
-    ]
+    filepath = SAVE_DIR / (datetime.now().strftime("%Y%m%d-%H%M%S") + ".wav")
+    with open(filepath, "wb") as f:
+        f.write(data)
 
     try:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+        with wave.open(str(filepath), "rb") as wf:
+            nchannels = wf.getnchannels()
+            sampwidth = wf.getsampwidth()
+            framerate = wf.getframerate()
+            nframes = wf.getnframes()
+
+            logging.info(
+                f"Received WAV: ch={nchannels}, width={sampwidth}, "
+                f"sr={framerate}, frames={nframes}"
+            )
+
+            if nchannels != 1:
+                raise ValueError(f"Expected mono audio, got {nchannels} channels")
+            if sampwidth != 2:
+                raise ValueError(f"Expected 16-bit PCM (2 bytes), got {sampwidth}")
+            if framerate != 16000:
+                raise ValueError(f"Expected 16 kHz sample rate, got {framerate}")
+
+            pcm_bytes = wf.readframes(nframes)
+
     except Exception as e:
-        raise RuntimeError(f"Failed to run whisper.cpp: {e}")
-
-    if result.returncode != 0:
-        # Log stderr somewhere if you want more debugging
-        raise RuntimeError(
-            f"whisper.cpp returned {result.returncode}.\nSTDERR:\n{result.stderr}"
+        logging.error(f"WAV parse error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid or unsupported WAV audio: {e}",
         )
 
-    return result.stdout.strip()
+    try:
+        audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        result = MODEL.transcribe(audio_np, language="en")  # or omit language to auto-detect
+        text = result.get("text", "").strip()
+    except Exception as e:
+        logging.error(f"Transcription error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Whisper transcription failed: {e}")
+
+    return {"text": text}
+
 
 if __name__ == "__main__":
     # For debugging audio, keep it simple (single process, no reload)

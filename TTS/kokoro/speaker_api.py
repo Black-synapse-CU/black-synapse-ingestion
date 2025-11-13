@@ -1,71 +1,91 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
-import subprocess
-import tempfile
+from fastapi import FastAPI, Request, HTTPException
+from datetime import datetime
 from pathlib import Path
-import os
+import logging
 import uvicorn
+import wave
+import pygame
 
 app = FastAPI()
 
-# Configure whisper paths
-WHISPER_BIN = os.getenv("WHISPER_BIN", r"C:\tools\whisper.cpp\main.exe")
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", r"C:\tools\whisper.cpp\models\ggml-base.en.bin")
+SAVE_DIR = Path("received_audio")
+SAVE_DIR.mkdir(exist_ok=True)
 
-WHISPER_ARGS = [
-    "-l", "en",  # force English
-    "-nt",       # no timestamps
-]
+logging.basicConfig(level=logging.INFO)
 
 
-def run_whisper(wav_path: Path) -> str:
-    if not Path(WHISPER_BIN).exists():
-        raise RuntimeError(f"Whisper binary not found: {WHISPER_BIN}")
-
-    if not Path(WHISPER_MODEL).exists():
-        raise RuntimeError(f"Model not found: {WHISPER_MODEL}")
-
-    cmd = [
-        str(WHISPER_BIN),
-        "-m", str(WHISPER_MODEL),
-        "-f", str(wav_path),
-        *WHISPER_ARGS
-    ]
-
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(f"whisper.cpp failed:\n{result.stderr}")
-
-    return result.stdout.strip()
-
-
-@app.post("/transcribe")
-async def transcribe(file: UploadFile = File(...)):
-    if not file.filename.lower().endswith(".wav"):
-        raise HTTPException(status_code=400, detail="Only .wav files are supported")
-
-    # Save temp file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        wav_path = Path(tmp.name)
-        content = await file.read()
-        tmp.write(content)
-
+@app.on_event("startup")
+def init_audio():
+    """
+    Initialize pygame mixer once when the app starts.
+    """
     try:
-        text = run_whisper(wav_path)
-    finally:
-        try:
-            wav_path.unlink()
-        except:
-            pass
+        pygame.mixer.init()  # you can pass frequency, size, channels, buffer if needed
+        logging.info("pygame.mixer initialized successfully")
+    except Exception as e:
+        logging.error(f"Failed to initialize pygame.mixer: {e}", exc_info=True)
 
-    return JSONResponse({"text": text})
+
+def play_with_pygame(path: Path):
+    """
+    Play a WAV file using pygame on any platform.
+    """
+    try:
+        # Load sound
+        sound = pygame.mixer.Sound(str(path))
+        # Play non-blocking; mixer runs in background
+        sound.play()
+        # If you REALLY want to block until done:
+        # while pygame.mixer.get_busy():
+        #     pygame.time.wait(50)
+    except Exception as e:
+        logging.error(f"Playback error with pygame: {e}", exc_info=True)
+        raise
+
+
+@app.post("/play")
+async def play(request: Request):
+    data = await request.body()
+    if not data:
+        raise HTTPException(status_code=400, detail="No audio data received")
+
+    # save file
+    filepath = SAVE_DIR / (datetime.now().strftime("%Y%m%d-%H%M%S") + ".wav")
+    with open(filepath, "wb") as f:
+        f.write(data)
+
+    # validate header + log params
+    try:
+        with wave.open(str(filepath), "rb") as wf:
+            nch, sampwidth, fr, nframes, comptype, compname = wf.getparams()
+    except Exception as e:
+        return {
+            "status": "saved_invalid_wav",
+            "file": str(filepath),
+            "error": f"{e}",
+        }
+
+    info = {
+        "status": "saved",
+        "file": str(filepath.resolve()),
+        "wav_params": {
+            "channels": nch,
+            "sample_width_bytes": sampwidth,
+            "sample_rate_hz": fr,
+            "frames": nframes,
+            "comptype": comptype,
+            "compname": compname,
+        },
+    }
+
+    # playback via pygame
+    try:
+        play_with_pygame(filepath)
+        info["playback"] = "ok"
+    except Exception as e:
+        info["playback"] = f"failed: {e}"
+
+    return info
 
 
 if __name__ == "__main__":
