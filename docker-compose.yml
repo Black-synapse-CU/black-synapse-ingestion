@@ -14,6 +14,7 @@ services:
       - WEBHOOK_URL=http://127.0.0.1:5678/
     volumes:
       - n8n_data:/home/node/.n8n
+      - "C:/Users/Elyas/OneDrive - The University of Colorado Denver/Desktop/projects/black-synapse-ingestion/ASR:/data/asr"
     depends_on:
       - qdrant
       - ollama
@@ -36,6 +37,16 @@ services:
 
     # TTS
     
+    # ASR
+    asr:
+      build: ./asr_server  # folder with your FastAPI + whisper.cpp Dockerfile
+      volumes:
+        - "C:/Users/Elyas/OneDrive - The University of Colorado Denver/Desktop/projects/black-synapse-ingestion/ASR:/data/asr"
+      environment:
+        - WHISPER_BIN=/app/whisper/main
+        - WHISPER_MODEL=/app/whisper/models/ggml-base.en.bin
+      ports:
+        - "8000:8000"
     
 
 

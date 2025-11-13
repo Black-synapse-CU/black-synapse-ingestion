@@ -283,3 +283,7 @@ cache/
 # Temporary files
 *.tmp
 *.temp
+
+# mp3/waav
+*.mp3
+*.wav
