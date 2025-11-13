@@ -1,0 +1,335 @@
+{
+  "name": "BlackSynapse",
+  "nodes": [
+    {
+      "parameters": {
+        "model": "gemma3:latest",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        640,
+        400
+      ],
+      "id": "6e23c6c7-f911-4c93-904f-39d6220ae5c6",
+      "name": "Ollama Chat Model",
+      "credentials": {
+        "ollamaApi": {
+          "id": "fGizSQbSugyb8K7Z",
+          "name": "Ollama account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "## ASR \nGet Audio -> Call ASR -> RAG Pipeline",
+        "width": 230
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        272,
+        -128
+      ],
+      "typeVersion": 1,
+      "id": "fd3185bd-8ba3-460d-a08f-c0232d345b5b",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## RAG Pipeline\nLLM w/Memory and Vector Database"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        560,
+        -16
+      ],
+      "typeVersion": 1,
+      "id": "38fafead-7ef7-4db0-97be-0c81c9c058d6",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## TTS\nPOST Into TTS API -> Speaker"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        848,
+        -16
+      ],
+      "typeVersion": 1,
+      "id": "1c973fb7-f128-47a9-90e5-35c3d2571983",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "## Trigger Node\nDetects a new recording from our Porcupine API and POSTs the file into Whisper.cpp",
+        "width": 214
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        -112,
+        -128
+      ],
+      "typeVersion": 1,
+      "id": "a7f0f443-4c85-45a6-bc32-f3056513a853",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8001/play",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "audio/wav"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1136,
+        176
+      ],
+      "id": "05b39ec7-33d2-4d45-87e0-53170591d26b",
+      "name": "Speaker"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "You are Jarvis, an intelligent, articulate voice assistant designed to assist with tasks, answer questions, and hold natural conversations.\n\nYou speak with clarity, confidence, and purpose—concise when needed, detailed when appropriate. You adapt to the user's tone, but maintain a respectful and calm demeanor. You can make proactive suggestions when helpful.\n\nYou are always informative, never condescending. Avoid filler words. Use correct grammar.\n\nRespond as if you're speaking aloud: natural, structured, and engaging—but not overly verbose.\n\nIf you're uncertain, explain your reasoning clearly and suggest possible next steps.\n\nConstraint/Must: Make sure your output is only has alphabets, no other characters (No newline \\n)"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        560,
+        176
+      ],
+      "id": "d3ac01d4-6b02-4045-8129-fb6b0234c582",
+      "name": "LLM - Ollama 3",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        336,
+        272
+      ],
+      "id": "f224dd28-c6f9-45b8-9034-d592ff7c1a08",
+      "name": "When chat message received",
+      "webhookId": "cb6a87a3-ce5e-4c22-97fc-f400ae98092f"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8880/v1/audio/speech",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n        \"model\": \"kokoro\",\n        \"input\": \"{{ $json.output }}\",\n        \"voice\": \"af_heart\",\n        \"response_format\": \"wav\",\n        \"speed\": 1.2,\n        \"stream\": false\n      }",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        912,
+        176
+      ],
+      "id": "a1644da6-f418-4102-b9fb-b03673dea81e",
+      "name": "KokoroTTS",
+      "alwaysOutputData": true,
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "triggerOn": "folder",
+        "path": "/data/asr",
+        "events": [
+          "add",
+          "change"
+        ],
+        "options": {
+          "followSymlinks": true,
+          "usePolling": true
+        }
+      },
+      "type": "n8n-nodes-base.localFileTrigger",
+      "typeVersion": 1,
+      "position": [
+        -112,
+        80
+      ],
+      "id": "255f9bb4-3a6c-43cd-89e5-787f888f70ed",
+      "name": "Local File Trigger",
+      "retryOnFail": false,
+      "alwaysOutputData": false,
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "content": "## Speaker API\nTakes the TTS Output and Plays it in the native speaker"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "position": [
+        1152,
+        -32
+      ],
+      "typeVersion": 1,
+      "id": "bfd357cc-d139-463a-a371-fb0551e490e4",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8002/transcribe",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "audio/wav"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        336,
+        80
+      ],
+      "id": "4e2305fe-bfe9-4545-a0c0-6f78c0188d80",
+      "name": "ASR: Whisper.cpp",
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "fileSelector": "={{ $json.path }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        112,
+        80
+      ],
+      "id": "ee295d42-4fe9-430c-9b6a-fb2dda784ee4",
+      "name": "Read/Write Files from Disk"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "LLM - Ollama 3",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM - Ollama 3": {
+      "main": [
+        [
+          {
+            "node": "KokoroTTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "LLM - Ollama 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "KokoroTTS": {
+      "main": [
+        [
+          {
+            "node": "Speaker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Local File Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read/Write Files from Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ASR: Whisper.cpp": {
+      "main": [
+        [
+          {
+            "node": "LLM - Ollama 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read/Write Files from Disk": {
+      "main": [
+        [
+          {
+            "node": "ASR: Whisper.cpp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f44ca56a-0b14-4bc9-8fcd-9dc6f8206a4c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "cf62c18d1d7d43f57771f2639fa7581d7f4995b1fc54b37462680c04da0cf259"
+  },
+  "id": "BLSqWHA8tjmOlR3W",
+  "tags": []
+}
