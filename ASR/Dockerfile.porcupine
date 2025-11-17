@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for audio
+RUN apt-get update && apt-get install -y \
+    portaudio19-dev \
+    alsa-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    pvporcupine \
+    sounddevice \
+    webrtcvad \
+    numpy \
+    python-dotenv
+
+# Copy the Porcupine script
+COPY porcupine_voice.py .
+
+# Expose any ports if needed (currently it just saves files locally)
+# EXPOSE 8003
+
+# Run Porcupine
+CMD ["python", "porcupine_voice.py"]
+

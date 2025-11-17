@@ -33,20 +33,53 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
-    # Postgres for chat memory
+  # ASR Service (Whisper transcription)
+  asr:
+    build:
+      context: ./ASR
+      dockerfile: Dockerfile
+    ports:
+      - "8002:8002"
+    volumes:
+      - asr_audio:/app/received_audio
+    environment:
+      - PYTHONUNBUFFERED=1
 
-    # TTS
-    
-    # ASR
-    asr:
-      build: ./asr_server  # folder with your FastAPI + whisper.cpp Dockerfile
-      volumes:
-        - "C:/Users/Elyas/OneDrive - The University of Colorado Denver/Desktop/projects/black-synapse-ingestion/ASR:/data/asr"
-      environment:
-        - WHISPER_BIN=/app/whisper/main
-        - WHISPER_MODEL=/app/whisper/models/ggml-base.en.bin
-      ports:
-        - "8000:8000"
+  # Porcupine Wake Word Detection
+  # Note: Audio device access requires Linux or WSL2 on Windows
+  # For Windows, you may need to configure PulseAudio or use WSL2
+  porcupine:
+    build:
+      context: ./ASR
+      dockerfile: Dockerfile.porcupine
+    volumes:
+      - asr_audio:/app/received_audio
+      - /dev/snd:/dev/snd  # Audio device access (Linux/WSL2)
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PICOVOICE_ACCESS_KEY=${PICOVOICE_ACCESS_KEY:-}
+    devices:
+      - /dev/snd:/dev/snd  # Audio device access
+    privileged: true  # Required for audio device access
+
+  # TTS Service (Kokoro speaker API)
+  # Note: Audio playback requires Linux or WSL2 on Windows
+  # For Windows, you may need to configure PulseAudio or use WSL2
+  tts:
+    build:
+      context: ./TTS/kokoro
+      dockerfile: Dockerfile.speaker
+    ports:
+      - "8001:8001"
+    volumes:
+      - tts_audio:/app/received_audio
+      - /dev/snd:/dev/snd  # Audio device access (Linux/WSL2)
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DISPLAY=${DISPLAY:-:0}  # For X11 forwarding if needed
+    devices:
+      - /dev/snd:/dev/snd  # Audio device access
+    privileged: true  # Required for audio device access
     
 
 
@@ -55,3 +88,5 @@ volumes:
   n8n_data:
   qdrant_data:
   ollama_data:
+  asr_audio:
+  tts_audio:
