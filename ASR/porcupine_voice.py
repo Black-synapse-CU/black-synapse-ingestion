@@ -32,7 +32,29 @@ def record_after_wake():
             "PICOVOICE_ACCESS_KEY environment variable is required. "
             "Get your access key from https://console.picovoice.ai/"
         )
-    porcupine = pvporcupine.create(access_key=access_key, keywords=["jarvis"])
+    
+    porcupine = None
+    stream = None
+    
+    try:
+        porcupine = pvporcupine.create(access_key=access_key, keywords=["jarvis"])
+    except pvporcupine.PorcupineActivationLimitError:
+        raise RuntimeError(
+            "Picovoice activation limit reached. This usually means:\n"
+            "1. Your free tier limit has been exceeded\n"
+            "2. The access key has been used on too many devices/platforms\n"
+            "3. The access key may be invalid or expired\n\n"
+            "Please check your account at https://console.picovoice.ai/ "
+            "or generate a new access key."
+        )
+    except pvporcupine.PorcupineActivationError as e:
+        raise RuntimeError(
+            f"Picovoice activation failed: {e}\n"
+            "Please verify your access key at https://console.picovoice.ai/"
+        )
+    except pvporcupine.PorcupineError as e:
+        raise RuntimeError(f"Picovoice initialization error: {e}")
+    
     vad = webrtcvad.Vad(2)
     # Use Porcupine's frame length for the stream
     stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=PORCUPINE_FRAME_LENGTH)
@@ -83,9 +105,17 @@ def record_after_wake():
                 print("[Resuming wake word detection...]\n")
                 # Continue listening for next wake word (don't break)
     finally:
-        stream.stop()
-        stream.close()
-        porcupine.delete()
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:
+                pass
+        if porcupine is not None:
+            try:
+                porcupine.delete()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     record_after_wake()
