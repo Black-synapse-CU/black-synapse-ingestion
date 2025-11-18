@@ -14,7 +14,7 @@ services:
       - WEBHOOK_URL=http://127.0.0.1:5678/
     volumes:
       - n8n_data:/home/node/.n8n
-      - "C:/Users/Elyas/OneDrive - The University of Colorado Denver/Desktop/projects/black-synapse-ingestion/ASR:/data/asr"
+      - "./ASR:/data/asr"
     depends_on:
       - qdrant
       - ollama
@@ -48,19 +48,19 @@ services:
   # Porcupine Wake Word Detection
   # Note: Audio device access requires Linux or WSL2 on Windows
   # For Windows, you may need to configure PulseAudio or use WSL2
-  porcupine:
-    build:
-      context: ./ASR
-      dockerfile: Dockerfile.porcupine
-    volumes:
-      - asr_audio:/app/received_audio
-      - /dev/snd:/dev/snd  # Audio device access (Linux/WSL2)
-    environment:
-      - PYTHONUNBUFFERED=1
-      - PICOVOICE_ACCESS_KEY=${PICOVOICE_ACCESS_KEY:-}
-    devices:
-      - /dev/snd:/dev/snd  # Audio device access
-    privileged: true  # Required for audio device access
+  # porcupine:
+  #   build:
+  #     context: ./ASR
+  #     dockerfile: Dockerfile.porcupine
+  #   volumes:
+  #     - asr_audio:/app/received_audio
+  #     - /dev/snd:/dev/snd  # Audio device access (Linux/WSL2)
+  #   environment:
+  #     - PYTHONUNBUFFERED=1
+  #     - PICOVOICE_ACCESS_KEY=${PICOVOICE_ACCESS_KEY:-}
+  #   devices:
+  #     - /dev/snd:/dev/snd  # Audio device access
+  #   privileged: true  # Required for audio device access
 
   # TTS Service (Kokoro speaker API)
   # Note: Audio playback requires Linux or WSL2 on Windows
