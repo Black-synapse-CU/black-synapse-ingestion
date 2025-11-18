@@ -32,6 +32,26 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Ollama model initialization - pulls gemma3 model automatically
+  ollama-init:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./ollama/init-models.sh:/init-models.sh
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["/bin/bash", "/init-models.sh"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
 
   # ASR Service (Whisper transcription)
   asr:
@@ -62,7 +82,25 @@ services:
   #     - /dev/snd:/dev/snd  # Audio device access
   #   privileged: true  # Required for audio device access
 
-  # TTS Service (Kokoro speaker API)
+  # Kokoro TTS Service (Text-to-Speech generation)
+  kokoro-tts:
+    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
+    ports:
+      - "8880:8880"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    # Optional: Add GPU support if you have NVIDIA GPU
+    # Uncomment the following lines if you want GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # TTS Service (Kokoro speaker API - audio playback)
   # Note: Audio playback requires Linux or WSL2 on Windows
   # For Windows, you may need to configure PulseAudio or use WSL2
   tts:
