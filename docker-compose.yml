@@ -114,17 +114,16 @@ services:
       - "8001:8001"
     volumes:
       - tts_audio:/app/received_audio
-      # Audio device access - only mount on Linux/WSL2 (commented for multi-platform compatibility)
-      # Uncomment the line below if running on Linux and need direct audio device access:
-      # - /dev/snd:/dev/snd
+      - /dev/snd:/dev/snd
     environment:
       - PYTHONUNBUFFERED=1
       - DISPLAY=${DISPLAY:-:0}  # For X11 forwarding if needed (Linux)
-    # Audio device access - only needed on Linux with direct device access
-    # Uncomment if running on Linux and need privileged audio access:
-    # devices:
-    #   - /dev/snd:/dev/snd
-    # privileged: true
+      - ALLOW_DUMMY_AUDIO=${ALLOW_DUMMY_AUDIO:-0}
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+    privileged: true
     restart: unless-stopped
     
 

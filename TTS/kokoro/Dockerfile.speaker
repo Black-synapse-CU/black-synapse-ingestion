@@ -7,6 +7,9 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     libsdl2-mixer-2.0-0 \
     libsdl2-2.0-0 \
+    libasound2 \
+    libasound2-plugins \
+    alsa-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
