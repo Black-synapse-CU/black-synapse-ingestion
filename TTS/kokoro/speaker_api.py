@@ -1,153 +1,214 @@
-from fastapi import FastAPI, Request, HTTPException
-from datetime import datetime
-from pathlib import Path
-import logging
+"""
+Speaker API
+-----------
+Runs a lightweight FastAPI server that accepts uploaded WAV or MP3 files and
+plays them inside the container using any available CLI audio player.
+"""
+
+from __future__ import annotations
+
 import os
-import threading
-import uvicorn
-import wave
-import wx
+import shutil
+import subprocess
+import uuid
+from pathlib import Path
+from typing import List, Sequence
 
-app = FastAPI()
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import JSONResponse
 
-SAVE_DIR = Path("received_audio")
-SAVE_DIR.mkdir(exist_ok=True)
+SUPPORTED_SUFFIXES = {".wav", ".mp3"}
+SUPPORTED_MIME_TYPES = {
+    "audio/wav": ".wav",
+    "audio/x-wav": ".wav",
+    "audio/mpeg": ".mp3",
+    "audio/mp3": ".mp3",
+}
+RECEIVED_DIR = Path(os.environ.get("RECEIVED_AUDIO_DIR", "received_audio"))
+PLAYER_ENV = os.environ.get("SPEAKER_PLAYER", "").strip()
 
-logging.basicConfig(level=logging.INFO)
+PLAYER_CANDIDATES: List[List[str]] = [
+    ["ffplay", "-nodisp", "-autoexit"],
+    ["aplay"],
+    ["paplay"],
+]
+
+FFMPEG_CMD = shutil.which("ffmpeg")
+
+app = FastAPI(title="Kokoro Speaker API", version="1.0.0")
+
+_player_cmd: List[str] | None = None
 
 
-ALLOW_DUMMY_AUDIO = os.getenv("ALLOW_DUMMY_AUDIO", "0").lower() in {"1", "true", "yes"}
+def _split_env_cmd(cmd_str: str) -> List[str]:
+    """Split SPEAKER_PLAYER env command respecting quotes."""
+    import shlex
 
-_wx_app = None
-_wx_ready = False
-_audio_silent = False
-_playing_sounds = set()
-_playing_lock = threading.Lock()
+    return shlex.split(cmd_str)
 
 
-def _initialize_mixer():
-    global _wx_app, _wx_ready, _audio_silent
+def _resolve_player() -> List[str]:
+    """Determine which playback command is available inside the container."""
+    candidates: Sequence[List[str]]
 
-    if _wx_ready or _audio_silent:
-        return
+    if PLAYER_ENV:
+        candidates = [_split_env_cmd(PLAYER_ENV)]
+    else:
+        candidates = PLAYER_CANDIDATES
+
+    for candidate in candidates:
+        if shutil.which(candidate[0]):
+            return list(candidate)
+
+    raise RuntimeError(
+        "No audio player found. Install ffmpeg (for ffplay) or alsa-utils (aplay) "
+        "or provide SPEAKER_PLAYER env var."
+    )
+
+
+def _ensure_tmp_dir() -> None:
+    RECEIVED_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _needs_wav_conversion(player_cmd: Sequence[str], suffix: str) -> bool:
+    return player_cmd and player_cmd[0] in {"aplay"} and suffix == ".mp3"
+
+
+def _convert_to_wav(source: Path) -> Path:
+    if not FFMPEG_CMD:
+        raise RuntimeError(
+            "MP3 playback requires ffmpeg when using aplay. Install ffmpeg "
+            "or set SPEAKER_PLAYER to ffplay."
+        )
+
+    wav_path = source.with_suffix(".wav")
+    subprocess.run(
+        [FFMPEG_CMD, "-y", "-i", str(source), str(wav_path)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=True,
+    )
+    return wav_path
+
+
+async def _store_upload(upload: UploadFile) -> Path:
+    suffix = Path(upload.filename or "").suffix.lower()
+    if not suffix and upload.content_type in SUPPORTED_MIME_TYPES:
+        suffix = SUPPORTED_MIME_TYPES[upload.content_type]
+
+    if suffix not in SUPPORTED_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{suffix or upload.content_type}'. "
+            "Only .wav or .mp3 are accepted.",
+        )
+
+    tmp_name = f"{uuid.uuid4().hex}{suffix}"
+    tmp_path = RECEIVED_DIR / tmp_name
+
+    with tmp_path.open("wb") as buffer:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            buffer.write(chunk)
+
+    if tmp_path.stat().st_size == 0:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    return tmp_path
+
+
+async def _store_stream(request: Request) -> Path:
+    content_type = (request.headers.get("content-type") or "").split(";")[0].strip()
+    suffix = SUPPORTED_MIME_TYPES.get(content_type)
+
+    if not suffix:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported or missing Content-Type '{content_type}'. "
+            "Use multipart form field 'file' or set Content-Type to "
+            "audio/wav or audio/mpeg.",
+        )
+
+    tmp_name = f"{uuid.uuid4().hex}{suffix}"
+    tmp_path = RECEIVED_DIR / tmp_name
+
+    bytes_written = 0
+    with tmp_path.open("wb") as buffer:
+        async for chunk in request.stream():
+            if not chunk:
+                continue
+            buffer.write(chunk)
+            bytes_written += len(chunk)
+
+    if bytes_written == 0:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Uploaded body is empty.")
+
+    return tmp_path
+
+
+def _play_file(file_path: Path, player_cmd: Sequence[str]) -> None:
+    target_path = file_path
+    converted_path: Path | None = None
+
+    if _needs_wav_conversion(player_cmd, file_path.suffix.lower()):
+        converted_path = _convert_to_wav(file_path)
+        target_path = converted_path
 
     try:
-        _wx_app = wx.App(False)
-        _wx_ready = True
-        logging.info("wxPython audio backend initialized successfully")
-    except Exception as exc:  # pylint: disable=broad-except
-        logging.error(
-            "Could not initialize wxPython audio backend. Ensure the container has "
-            "access to an audio device and (on Linux) a DISPLAY.",
-            exc_info=True,
+        subprocess.run(
+            list(player_cmd) + [str(target_path)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        if not ALLOW_DUMMY_AUDIO:
-            raise RuntimeError(
-                "Audio device unavailable. Set ALLOW_DUMMY_AUDIO=1 to bypass playback "
-                "or expose the host sound device to the container."
-            ) from exc
-        _audio_silent = True
-        logging.warning("Continuing without audio output (ALLOW_DUMMY_AUDIO=1)")
+    except subprocess.CalledProcessError as exc:
+        raise HTTPException(status_code=500, detail=f"Playback failed: {exc}") from exc
+    finally:
+        if converted_path and converted_path.exists():
+            converted_path.unlink(missing_ok=True)
 
 
 @app.on_event("startup")
-def init_audio():
-    """
-    Initialize pygame mixer once when the app starts.
-    """
-    _initialize_mixer()
+def startup_event() -> None:
+    global _player_cmd
+    _ensure_tmp_dir()
+    _player_cmd = _resolve_player()
 
 
-def play_with_wx(path: Path):
-    """
-    Play a WAV file using wxPython on any platform.
-    """
-    if _audio_silent:
-        logging.info("Audio playback is disabled; skipping wx.Sound playback.")
-        return
-
-    if not _wx_ready:
-        _initialize_mixer()
-
-    if not _wx_ready:
-        logging.warning("Skipping playback; wx backend is unavailable.")
-        return
-
-    try:
-        sound = wx.Sound(str(path))
-        if not sound.IsOk():
-            raise RuntimeError(f"wx.Sound could not load file {path}")
-
-        played = sound.Play(wx.SOUND_ASYNC)
-        if not played:
-            raise RuntimeError("wx.Sound.Play returned False")
-
-        duration_ms = sound.GetLength()
-        with _playing_lock:
-            _playing_sounds.add(sound)
-
-        cleanup_delay = (duration_ms / 1000.0) + 1 if duration_ms > 0 else 5
-        timer = threading.Timer(
-            cleanup_delay,
-            lambda: _remove_sound(sound),
-        )
-        timer.daemon = True
-        timer.start()
-    except Exception as e:  # pylint: disable=broad-except
-        logging.error(f"Playback error with wx.Sound: {e}", exc_info=True)
-        raise
-
-
-def _remove_sound(sound: wx.Sound):
-    with _playing_lock:
-        _playing_sounds.discard(sound)
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok", "player": _player_cmd[0] if _player_cmd else None}
 
 
 @app.post("/play")
-async def play(request: Request):
-    data = await request.body()
-    if not data:
-        raise HTTPException(status_code=400, detail="No audio data received")
+async def play_audio(request: Request, file: UploadFile | None = File(None)):
+    if _player_cmd is None:
+        raise HTTPException(status_code=503, detail="Audio player not ready")
 
-    # save file
-    filepath = SAVE_DIR / (datetime.now().strftime("%Y%m%d-%H%M%S") + ".wav")
-    with open(filepath, "wb") as f:
-        f.write(data)
+    if file is not None:
+        stored_path = await _store_upload(file)
+    else:
+        stored_path = await _store_stream(request)
 
-    # validate header + log params
     try:
-        with wave.open(str(filepath), "rb") as wf:
-            nch, sampwidth, fr, nframes, comptype, compname = wf.getparams()
-    except Exception as e:
-        return {
-            "status": "saved_invalid_wav",
-            "file": str(filepath),
-            "error": f"{e}",
-        }
+        _play_file(stored_path, _player_cmd)
+    finally:
+        stored_path.unlink(missing_ok=True)
 
-    info = {
-        "status": "saved",
-        "file": str(filepath.resolve()),
-        "wav_params": {
-            "channels": nch,
-            "sample_width_bytes": sampwidth,
-            "sample_rate_hz": fr,
-            "frames": nframes,
-            "comptype": comptype,
-            "compname": compname,
-        },
-    }
-
-    # playback via wxPython
-    try:
-        play_with_wx(filepath)
-        info["playback"] = "ok"
-    except Exception as e:
-        info["playback"] = f"failed: {e}"
-
-    return info
+    return JSONResponse({"status": "played"})
 
 
 if __name__ == "__main__":
-    # For debugging audio, keep it simple (single process, no reload)
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    import uvicorn
+
+    uvicorn.run(
+        "speaker_api:app",
+        host=os.environ.get("HOST", "0.0.0.0"),
+        port=int(os.environ.get("PORT", "8001")),
+        reload=False,
+    )
+
