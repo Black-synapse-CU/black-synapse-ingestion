@@ -3,9 +3,10 @@ from datetime import datetime
 from pathlib import Path
 import logging
 import os
+import threading
 import uvicorn
 import wave
-import pygame
+import wx
 
 app = FastAPI()
 
@@ -15,56 +16,38 @@ SAVE_DIR.mkdir(exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 
 
-ALLOW_DUMMY_AUDIO = os.getenv("ALLOW_DUMMY_AUDIO", "0").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+ALLOW_DUMMY_AUDIO = os.getenv("ALLOW_DUMMY_AUDIO", "0").lower() in {"1", "true", "yes"}
 
-_mixer_ready = False
-_using_dummy_driver = False
+_wx_app = None
+_wx_ready = False
+_audio_silent = False
+_playing_sounds = set()
+_playing_lock = threading.Lock()
 
 
 def _initialize_mixer():
-    global _mixer_ready, _using_dummy_driver
+    global _wx_app, _wx_ready, _audio_silent
 
-    if _mixer_ready:
+    if _wx_ready or _audio_silent:
         return
 
     try:
-        pygame.mixer.init()
-        _mixer_ready = True
-        _using_dummy_driver = False
-        logging.info("pygame.mixer initialized successfully")
-        return
-    except pygame.error as e1:
+        _wx_app = wx.App(False)
+        _wx_ready = True
+        logging.info("wxPython audio backend initialized successfully")
+    except Exception as exc:  # pylint: disable=broad-except
         logging.error(
-            "Primary mixer initialization failed. Ensure /dev/snd is passed through "
-            "and the host audio device is accessible.",
+            "Could not initialize wxPython audio backend. Ensure the container has "
+            "access to an audio device and (on Linux) a DISPLAY.",
             exc_info=True,
         )
         if not ALLOW_DUMMY_AUDIO:
             raise RuntimeError(
                 "Audio device unavailable. Set ALLOW_DUMMY_AUDIO=1 to bypass playback "
                 "or expose the host sound device to the container."
-            ) from e1
-
-    # Attempt fallback to SDL dummy driver so container can still boot if explicitly allowed
-    previous_driver = os.environ.get("SDL_AUDIODRIVER")
-    if previous_driver != "dummy":
-        os.environ["SDL_AUDIODRIVER"] = "dummy"
-
-    try:
-        pygame.mixer.init()
-        _mixer_ready = True
-        _using_dummy_driver = True
-        logging.warning(
-            "pygame.mixer initialized with SDL dummy driver (no audio output)"
-        )
-    except pygame.error as e2:
-        raise RuntimeError(
-            "Could not initialize pygame.mixer even with SDL dummy driver"
-        ) from e2
+            ) from exc
+        _audio_silent = True
+        logging.warning("Continuing without audio output (ALLOW_DUMMY_AUDIO=1)")
 
 
 @app.on_event("startup")
@@ -75,32 +58,49 @@ def init_audio():
     _initialize_mixer()
 
 
-def play_with_pygame(path: Path):
+def play_with_wx(path: Path):
     """
-    Play a WAV file using pygame on any platform.
+    Play a WAV file using wxPython on any platform.
     """
-    if not _mixer_ready:
+    if _audio_silent:
+        logging.info("Audio playback is disabled; skipping wx.Sound playback.")
+        return
+
+    if not _wx_ready:
         _initialize_mixer()
 
-    if not _mixer_ready:
-        logging.warning("Skipping playback; mixer still unavailable")
+    if not _wx_ready:
+        logging.warning("Skipping playback; wx backend is unavailable.")
         return
 
     try:
-        # Load sound
-        sound = pygame.mixer.Sound(str(path))
-        # Play non-blocking; mixer runs in background
-        sound.play()
-        if _using_dummy_driver:
-            logging.info(
-                "Playback invoked but SDL dummy driver is active; no audio will play."
-            )
-        # If you REALLY want to block until done:
-        # while pygame.mixer.get_busy():
-        #     pygame.time.wait(50)
-    except Exception as e:
-        logging.error(f"Playback error with pygame: {e}", exc_info=True)
+        sound = wx.Sound(str(path))
+        if not sound.IsOk():
+            raise RuntimeError(f"wx.Sound could not load file {path}")
+
+        played = sound.Play(wx.SOUND_ASYNC)
+        if not played:
+            raise RuntimeError("wx.Sound.Play returned False")
+
+        duration_ms = sound.GetLength()
+        with _playing_lock:
+            _playing_sounds.add(sound)
+
+        cleanup_delay = (duration_ms / 1000.0) + 1 if duration_ms > 0 else 5
+        timer = threading.Timer(
+            cleanup_delay,
+            lambda: _remove_sound(sound),
+        )
+        timer.daemon = True
+        timer.start()
+    except Exception as e:  # pylint: disable=broad-except
+        logging.error(f"Playback error with wx.Sound: {e}", exc_info=True)
         raise
+
+
+def _remove_sound(sound: wx.Sound):
+    with _playing_lock:
+        _playing_sounds.discard(sound)
 
 
 @app.post("/play")
@@ -138,9 +138,9 @@ async def play(request: Request):
         },
     }
 
-    # playback via pygame
+    # playback via wxPython
     try:
-        play_with_pygame(filepath)
+        play_with_wx(filepath)
         info["playback"] = "ok"
     except Exception as e:
         info["playback"] = f"failed: {e}"
