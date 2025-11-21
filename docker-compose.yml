@@ -95,30 +95,40 @@ services:
     # deploy:
     #   resources:
     #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: 1
+    #       devices:    #           count: 1
     #           capabilities: [gpu]
 
   # TTS Service (Kokoro speaker API - audio playback)
-  # Note: Audio playback requires Linux or WSL2 on Windows
-  # For Windows, you may need to configure PulseAudio or use WSL2
+  # Multi-platform support: Works on Linux, macOS (Docker Desktop), and Windows (WSL2)
+  # Note: Audio playback in Docker works best on Linux/WSL2. On Windows/macOS,
+  # pygame will use available audio systems (may require additional host configuration)
   tts:
     build:
       context: ./TTS/kokoro
       dockerfile: Dockerfile.speaker
+      # Multi-platform build support
+      platforms:
+        - linux/amd64
+        - linux/arm64
     ports:
       - "8001:8001"
     volumes:
       - tts_audio:/app/received_audio
-      - /dev/snd:/dev/snd  # Audio device access (Linux/WSL2)
+      # Audio device access - only mount on Linux/WSL2 (commented for multi-platform compatibility)
+      # Uncomment the line below if running on Linux and need direct audio device access:
+      # - /dev/snd:/dev/snd
     environment:
       - PYTHONUNBUFFERED=1
-      - DISPLAY=${DISPLAY:-:0}  # For X11 forwarding if needed
-    devices:
-      - /dev/snd:/dev/snd  # Audio device access
-    privileged: true  # Required for audio device access
+      - DISPLAY=${DISPLAY:-:0}  # For X11 forwarding if needed (Linux)
+    # Audio device access - only needed on Linux with direct device access
+    # Uncomment if running on Linux and need privileged audio access:
+    # devices:
+    #   - /dev/snd:/dev/snd
+    # privileged: true
+    restart: unless-stopped
     
+
+    #         - driver: nvidia
 
 
 
