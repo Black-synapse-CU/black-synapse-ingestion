@@ -8,6 +8,8 @@ import logging
 import os
 import asyncio
 from typing import List, Dict, Any
+# `tiktoken` and `openai` are imported lazily inside functions that need them
+
 import tiktoken
 import openai
 import numpy as np
@@ -25,7 +27,7 @@ def setup_logging():
         ]
     )
 
-def chunk_text(text: str, tokenizer: tiktoken.Encoding, 
+def chunk_text(text: str, tokenizer: Any, 
                max_tokens: int = 500, overlap_tokens: int = 50) -> List[Dict[str, Any]]:
     """
     Chunk text into overlapping segments for embedding.
@@ -92,7 +94,7 @@ def chunk_text(text: str, tokenizer: tiktoken.Encoding,
     
     return chunks
 
-async def get_embedding(texts: List[str], openai_client: openai.OpenAI, 
+async def get_embedding(texts: List[str], openai_client: Any, 
                        model: str = "text-embedding-3-small") -> List[List[float]]:
     """
     Generate embeddings for a list of texts using OpenAI's embedding API.
@@ -119,6 +121,26 @@ async def get_embedding(texts: List[str], openai_client: openai.OpenAI,
         # Extract embeddings from response
         embeddings = [data.embedding for data in response.data]
         
+        # Validate that we got the expected number of embeddings
+        if len(embeddings) != len(texts):
+            error_msg = f"Embedding count mismatch: expected {len(texts)} embeddings, got {len(embeddings)}"
+            logging.error(error_msg)
+            raise ValueError(error_msg)
+        
+        # Validate embedding dimensions (log warning if unexpected)
+        if embeddings:
+            dim = len(embeddings[0])
+            expected_dims = {"text-embedding-3-small": 1536, "text-embedding-3-large": 3072}
+            if model in expected_dims and dim != expected_dims[model]:
+                logging.warning(f"Unexpected embedding dimension for {model}: expected {expected_dims[model]}, got {dim}")
+            # Verify all embeddings have the same dimension
+            for i, emb in enumerate(embeddings):
+                if len(emb) != dim:
+                    error_msg = f"Embedding dimension mismatch at index {i}: expected {dim}, got {len(emb)}"
+                    logging.error(error_msg)
+                    raise ValueError(error_msg)
+        
+        logging.info(f"Successfully generated {len(embeddings)} embeddings using model {model}")
         return embeddings
         
     except Exception as e:
@@ -187,7 +209,7 @@ def format_api_response(success: bool, message: str, **kwargs) -> Dict[str, Any]
     response.update(kwargs)
     return response
 
-def calculate_text_similarity(text1: str, text2: str, tokenizer: tiktoken.Encoding) -> float:
+def calculate_text_similarity(text1: str, text2: str, tokenizer: Any) -> float:
     """
     Calculate similarity between two texts using token overlap.
     
@@ -231,7 +253,7 @@ def sanitize_text(text: str) -> str:
     
     return sanitized
 
-def estimate_tokens(text: str, tokenizer: tiktoken.Encoding) -> int:
+def estimate_tokens(text: str, tokenizer: Any) -> int:
     """
     Estimate the number of tokens in text without full tokenization.
     
@@ -247,6 +269,42 @@ def estimate_tokens(text: str, tokenizer: tiktoken.Encoding) -> int:
     
     # Simple estimation: average 4 characters per token
     return len(text) // 4
+
+def validate_vector(vec: Any, expected_dim: int) -> None:
+    """
+    Validate a vector's type and dimensionality.
+
+    Raises ValueError if the vector is invalid.
+
+    Args:
+        vec: Vector to validate (list, tuple, or numpy array)
+        expected_dim: Expected dimensionality (int)
+    """
+    # Accept numpy arrays, lists, tuples
+    if vec is None:
+        raise ValueError("Vector is None")
+
+    # Convert numpy arrays to list for uniform checks
+    if isinstance(vec, np.ndarray):
+        if vec.ndim != 1:
+            raise ValueError(f"Expected 1-D vector, got array with ndim={vec.ndim}")
+        length = int(vec.shape[0])
+    elif isinstance(vec, (list, tuple)):
+        length = len(vec)
+    else:
+        raise ValueError(f"Unsupported vector type: {type(vec)}")
+
+    if length != int(expected_dim):
+        raise ValueError(f"Vector dimension mismatch: expected {expected_dim}, got {length}")
+
+    # Check numeric elements (fast path)
+    try:
+        # If it's a list/tuple, check a few elements to avoid heavy work
+        if length > 0:
+            sample = vec[0] if not isinstance(vec, np.ndarray) else vec[0].item()
+            float(sample)
+    except Exception as e:
+        raise ValueError(f"Vector elements are not numeric: {e}")
 
 def create_metadata_summary(document: Dict[str, Any]) -> Dict[str, Any]:
     """

@@ -18,13 +18,14 @@ from datetime import datetime
 import json
 
 import openai
+import httpx
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import tiktoken
 
-from .utils import chunk_text, get_embedding, setup_logging
+from .utils import chunk_text, get_embedding, setup_logging, validate_vector
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +34,18 @@ class IngestionPipeline:
     
     def __init__(self):
         """Initialize the ingestion pipeline with database connections."""
-        self.openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        self.qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL"))
+        # Create explicit httpx client and pass to OpenAI to avoid compatibility issues
+        httpx_client = httpx.Client()
+        self.openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"), http_client=httpx_client)
+
+        # Qdrant client; default to the internal compose hostname if not provided
+        qdrant_url = os.getenv("QDRANT_URL", "http://qdrant:6333")
+        self.qdrant_client = QdrantClient(url=qdrant_url)
+        self.postgres_url = os.getenv("POSTGRES_URL")
+
+        # Embedding configuration (configurable via env)
+        self.embedding_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        self.embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
         self.postgres_url = os.getenv("POSTGRES_URL")
         
         # Initialize tokenizer for chunking
@@ -70,7 +81,7 @@ class IngestionPipeline:
                 self.qdrant_client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
-                        size=1536,  # text-embedding-3-small dimension
+                        size=self.embedding_dim,
                         distance=Distance.COSINE
                     )
                 )
@@ -217,11 +228,32 @@ class IngestionPipeline:
             
             # Generate embeddings for all chunks
             chunk_texts = [chunk["text"] for chunk in chunks]
-            embeddings = await get_embedding(chunk_texts, self.openai_client)
+            embeddings = await get_embedding(chunk_texts, self.openai_client, model=self.embedding_model)
+            
+            # Validate embeddings
+            if len(embeddings) != len(chunks):
+                error_msg = f"Embedding count mismatch: expected {len(chunks)} embeddings, got {len(embeddings)}"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
+            # Validate embedding dimensions (text-embedding-3-small should return 1536 dimensions)
+            expected_dim = 1536
+            for i, embedding in enumerate(embeddings):
+                if len(embedding) != expected_dim:
+                    error_msg = f"Embedding dimension mismatch at index {i}: expected {expected_dim}, got {len(embedding)}"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+            
+            logger.info(f"Generated {len(embeddings)} embeddings with dimension {len(embeddings[0]) if embeddings else 0)}")
             
             # Prepare points for Qdrant
             points = []
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+                # Validate embedding dimensionality before creating point
+                try:
+                    validate_vector(embedding, self.embedding_dim)
+                except Exception as ve:
+                    raise ValueError(f"Invalid embedding for chunk {i}: {ve}")
                 point = PointStruct(
                     id=f"{document.doc_id}_{i}",
                     vector=embedding,
