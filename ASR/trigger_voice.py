@@ -1,71 +1,60 @@
 ### voice_trigger.py
 # Handles wake word detection + VAD-based recording
-# Continuously listens for "Jarvis" wake word and records audio after detection
+# Continuously listens for wake word and records audio after detection
 
-import os
-from dotenv import load_dotenv
-import pvporcupine
 import webrtcvad
 import sounddevice as sd
 import numpy as np
 import wave
-
-# Load environment variables from .env file
-load_dotenv()
+from openwakeword import Model
+import openwakeword
 
 SAMPLE_RATE = 16000
-# Porcupine requires 512 samples per frame at 16kHz
-PORCUPINE_FRAME_LENGTH = 512
+# OpenWakeWord processes audio in chunks (typically 1280 samples = 80ms at 16kHz)
+# Using 1280 samples per frame for optimal performance
+OWW_FRAME_LENGTH = 1280
 # VAD frame size (30ms for optimal VAD performance)
 VAD_FRAME_DURATION_MS = 30
 VAD_FRAME_SIZE = int(SAMPLE_RATE * VAD_FRAME_DURATION_MS / 1000)
 SILENCE_FRAMES = int(800 / VAD_FRAME_DURATION_MS)
 OUTPUT_WAV = "utterance.wav"
+# Detection threshold for wake word (adjust between 0.0 and 1.0)
+WAKE_WORD_THRESHOLD = 0.5
 
 def is_speech(frame, vad):
     return vad.is_speech(frame.tobytes(), SAMPLE_RATE)
 
 def record_after_wake():
-    access_key = os.getenv("PICOVOICE_ACCESS_KEY")
-    if not access_key:
-        raise ValueError(
-            "PICOVOICE_ACCESS_KEY environment variable is required. "
-            "Get your access key from https://console.picovoice.ai/"
-        )
-    
-    porcupine = None
+    oww_model = None
     stream = None
+
+    openwakeword.utils.download_models()
     
     try:
-        porcupine = pvporcupine.create(access_key=access_key, keywords=["jarvis"])
-    except pvporcupine.PorcupineActivationLimitError:
-        raise RuntimeError(
-            "Picovoice activation limit reached. This usually means:\n"
-            "1. Your free tier limit has been exceeded\n"
-            "2. The access key has been used on too many devices/platforms\n"
-            "3. The access key may be invalid or expired\n\n"
-            "Please check your account at https://console.picovoice.ai/ "
-            "or generate a new access key."
-        )
-    except pvporcupine.PorcupineActivationError as e:
-        raise RuntimeError(
-            f"Picovoice activation failed: {e}\n"
-            "Please verify your access key at https://console.picovoice.ai/"
-        )
-    except pvporcupine.PorcupineError as e:
-        raise RuntimeError(f"Picovoice initialization error: {e}")
+        # Initialize OpenWakeWord model
+        # Available models: "alexa", "hey_jarvis", "hey_mycroft", "hey_porcupine", "hey_rhasspy", "hey_spot", "hey_raven", "timer"
+        # Using "hey_jarvis" as it's closest to "Jarvis"
+        oww_model = Model(wakeword_models=["hey_jarvis"])
+        wake_word_name = "hey_jarvis"
+    except Exception as e:
+        raise RuntimeError(f"OpenWakeWord initialization error: {e}")
     
     vad = webrtcvad.Vad(2)
-    # Use Porcupine's frame length for the stream
-    stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=PORCUPINE_FRAME_LENGTH)
+    # Use OpenWakeWord's recommended frame length for the stream
+    stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='int16', blocksize=OWW_FRAME_LENGTH)
     
     try:
         stream.start()
-        print("[Listening for wake word 'Jarvis']")
+        print("[Listening for wake word 'hey_jarvis']")
 
         while True:
-            pcm = stream.read(PORCUPINE_FRAME_LENGTH)[0].flatten()
-            if porcupine.process(pcm.tolist()) >= 0:
+            pcm = stream.read(OWW_FRAME_LENGTH)[0].flatten()
+            
+            # Process audio through OpenWakeWord
+            prediction = oww_model.predict(pcm)
+            
+            # Check if wake word detected (prediction is a dict with model names as keys)
+            if wake_word_name in prediction and prediction[wake_word_name] > WAKE_WORD_THRESHOLD:
                 print("[Wake word detected!] Recording...")
                 frames = []
                 silence_counter = 0
@@ -73,7 +62,7 @@ def record_after_wake():
                 vad_buffer = np.array([], dtype=np.int16)
 
                 while True:
-                    frame = stream.read(PORCUPINE_FRAME_LENGTH)[0].flatten()
+                    frame = stream.read(OWW_FRAME_LENGTH)[0].flatten()
                     frames.append(frame)
                     vad_buffer = np.concatenate([vad_buffer, frame])
                     
@@ -111,9 +100,10 @@ def record_after_wake():
                 stream.close()
             except Exception:
                 pass
-        if porcupine is not None:
+        if oww_model is not None:
             try:
-                porcupine.delete()
+                # OpenWakeWord models don't require explicit cleanup, but we can reset if needed
+                pass
             except Exception:
                 pass
 

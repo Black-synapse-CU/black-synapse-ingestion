@@ -1,8 +1,7 @@
-pvporcupine 
 sounddevice 
 webrtcvad 
 numpy
-python-dotenv
 fastapi
 uvicorn
 httpx
+openwakeword
