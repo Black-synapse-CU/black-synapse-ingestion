@@ -3,7 +3,7 @@
   "nodes": [
     {
       "parameters": {
-        "model": "llama3.2:1b",
+        "model": "gemma3:latest",
         "options": {}
       },
       "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
@@ -12,12 +12,12 @@
         672,
         512
       ],
-      "id": "d9a95d34-5acf-4cfa-8436-e5327ef6373c",
+      "id": "08e9e750-fc9c-48a5-bde1-15ea65296526",
       "name": "Ollama Chat Model",
       "credentials": {
         "ollamaApi": {
-          "id": "E0eX7omiBZe8dM8s",
-          "name": "Ollama account"
+          "id": "D7wl7IJSHcJeWAYg",
+          "name": "Unnamed credential"
         }
       }
     },
@@ -32,7 +32,7 @@
         0
       ],
       "typeVersion": 1,
-      "id": "77261bb1-ed04-457a-bb1d-894f2f3999ce",
+      "id": "a2c3740c-cb05-4f05-a7eb-1efd615b8729",
       "name": "Sticky Note"
     },
     {
@@ -45,7 +45,7 @@
         112
       ],
       "typeVersion": 1,
-      "id": "f48f4699-1926-41b7-a1fa-41c69c39b01d",
+      "id": "3c935f9c-cbae-499a-94e3-1ba70ca32d0c",
       "name": "Sticky Note1"
     },
     {
@@ -58,7 +58,7 @@
         112
       ],
       "typeVersion": 1,
-      "id": "9e8a87d5-3a2c-4728-8994-8d7f65848821",
+      "id": "7b9bedf4-8700-4d40-af40-4ac08c712889",
       "name": "Sticky Note2"
     },
     {
@@ -72,13 +72,13 @@
         0
       ],
       "typeVersion": 1,
-      "id": "5f6b6ad2-9fe3-4d91-95c7-9bc5c7c35d81",
+      "id": "a6ce00b9-6031-4ee4-9b4e-ea8ef3e50db1",
       "name": "Sticky Note3"
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:8001/play",
+        "url": "http://localhost:8001/play",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -99,7 +99,7 @@
         1248,
         304
       ],
-      "id": "40a45109-28b4-4d5c-80ba-954681dd77a6",
+      "id": "c6d8e32d-909e-4147-9b68-6cb9b0f95832",
       "name": "Speaker"
     },
     {
@@ -116,28 +116,14 @@
         672,
         304
       ],
-      "id": "95c54230-8314-4c2e-86f0-959d4ed70a68",
+      "id": "1c112317-58cd-46ac-b8f1-6a64a5610f56",
       "name": "LLM - Ollama 3",
       "alwaysOutputData": false
     },
     {
       "parameters": {
-        "options": {}
-      },
-      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
-      "typeVersion": 1.3,
-      "position": [
-        448,
-        400
-      ],
-      "id": "cb221684-09c6-4046-9b8b-864bc486f4b8",
-      "name": "When chat message received",
-      "webhookId": "cb6a87a3-ce5e-4c22-97fc-f400ae98092f"
-    },
-    {
-      "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:8880/v1/audio/speech",
+        "url": "http://172.18.0.1:8880/v1/audio/speech",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={\n        \"model\": \"kokoro\",\n        \"input\": \"{{ $json.output }}\",\n        \"voice\": \"af_heart\",\n        \"response_format\": \"wav\",\n        \"speed\": 1.2,\n        \"stream\": false\n      }",
@@ -155,7 +141,7 @@
         1024,
         304
       ],
-      "id": "584cb754-181f-48cf-aa86-722fecf3cd3f",
+      "id": "bfa93994-3c96-4be6-9596-9f45ea330172",
       "name": "KokoroTTS",
       "alwaysOutputData": true,
       "executeOnce": false
@@ -179,7 +165,7 @@
         0,
         208
       ],
-      "id": "23eb9e9c-d7e5-48d4-8157-5675e691d4aa",
+      "id": "197cc917-bbe4-4217-a847-0b30220dbdba",
       "name": "Local File Trigger",
       "retryOnFail": false,
       "alwaysOutputData": false,
@@ -195,13 +181,13 @@
         112
       ],
       "typeVersion": 1,
-      "id": "5bf38d27-124b-4bf5-901b-0d37e1ef9d9c",
+      "id": "49d4f6cf-20bc-4b58-828a-e9b8b8ce0160",
       "name": "Sticky Note4"
     },
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:8002/transcribe",
+        "url": "http://172.18.0.1:8002/transcribe",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -222,7 +208,7 @@
         448,
         208
       ],
-      "id": "f95a9bca-6faa-4349-a4a3-179b4d7aad09",
+      "id": "e55b4e24-f210-4d07-9177-1d222aa884f8",
       "name": "ASR: Whisper.cpp",
       "executeOnce": false
     },
@@ -237,8 +223,64 @@
         224,
         208
       ],
-      "id": "716ddbb6-1b24-4296-b033-9d387cefce53",
+      "id": "ddc31929-7bfb-4e68-b4b0-2a3c26262b10",
       "name": "Read/Write Files from Disk"
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.3,
+      "position": [
+        768,
+        640
+      ],
+      "id": "b6454765-917b-4a42-bfa8-19257964bf2f",
+      "name": "Postgres Chat Memory"
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolDescription": "This is your Qdrant vector database",
+        "qdrantCollection": {
+          "__rl": true,
+          "mode": "list",
+          "value": ""
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreQdrant",
+      "typeVersion": 1.3,
+      "position": [
+        944,
+        560
+      ],
+      "id": "fadb2a26-aa8a-47c4-acdb-cab6f39aceaa",
+      "name": "Qdrant Vector Store1",
+      "credentials": {
+        "qdrantApi": {
+          "id": "MTIow2xR42dUhrTT",
+          "name": "QdrantApi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "gemma3:latest"
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsOllama",
+      "typeVersion": 1,
+      "position": [
+        928,
+        768
+      ],
+      "id": "ce1b2dbb-fdff-46a0-91df-8d5b811d1f68",
+      "name": "Embeddings Ollama",
+      "credentials": {
+        "ollamaApi": {
+          "id": "D7wl7IJSHcJeWAYg",
+          "name": "Unnamed credential"
+        }
+      }
     }
   ],
   "pinData": {},
@@ -259,17 +301,6 @@
         [
           {
             "node": "KokoroTTS",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "When chat message received": {
-      "main": [
-        [
-          {
-            "node": "LLM - Ollama 3",
             "type": "main",
             "index": 0
           }
@@ -319,17 +350,38 @@
           }
         ]
       ]
+    },
+    "Postgres Chat Memory": {
+      "ai_memory": [
+        []
+      ]
+    },
+    "Qdrant Vector Store1": {
+      "ai_tool": [
+        []
+      ]
+    },
+    "Embeddings Ollama": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Qdrant Vector Store1",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
     }
   },
   "active": false,
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "58455760-c3b4-4925-99cd-213c4799b94f",
+  "versionId": "b2ffab03-cf0a-4f00-9859-7bbacd2a6cde",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "cf62c18d1d7d43f57771f2639fa7581d7f4995b1fc54b37462680c04da0cf259"
   },
-  "id": "P6NWo0q9Ovxl2Qqf",
+  "id": "tgLbpnHOc3rifg2P",
   "tags": []
 }
