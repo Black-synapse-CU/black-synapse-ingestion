@@ -6,6 +6,7 @@ import webrtcvad
 import sounddevice as sd
 import numpy as np
 import wave
+import time
 from openwakeword import Model
 import openwakeword
 
@@ -20,6 +21,8 @@ SILENCE_FRAMES = int(800 / VAD_FRAME_DURATION_MS)
 OUTPUT_WAV = "utterance.wav"
 # Detection threshold for wake word (adjust between 0.0 and 1.0)
 WAKE_WORD_THRESHOLD = 0.5
+# Cooldown period after detection (seconds) - prevents immediate re-detection
+COOLDOWN_SECONDS = 2.0
 
 def is_speech(frame, vad):
     return vad.is_speech(frame.tobytes(), SAMPLE_RATE)
@@ -27,11 +30,11 @@ def is_speech(frame, vad):
 def record_after_wake():
     oww_model = None
     stream = None
-
-    openwakeword.utils.download_models()
     
     try:
         # Initialize OpenWakeWord model
+        openwakeword.utils.download_models()
+
         # Available models: "alexa", "hey_jarvis", "hey_mycroft", "hey_porcupine", "hey_rhasspy", "hey_spot", "hey_raven", "timer"
         # Using "hey_jarvis" as it's closest to "Jarvis"
         oww_model = Model(wakeword_models=["hey_jarvis"])
@@ -46,6 +49,9 @@ def record_after_wake():
     try:
         stream.start()
         print("[Listening for wake word 'hey_jarvis']")
+        
+        last_detection_time = 0.0  # Track when last wake word was detected
+        cooldown_frames_to_flush = int(COOLDOWN_SECONDS * SAMPLE_RATE / OWW_FRAME_LENGTH)  # Frames to flush during cooldown
 
         while True:
             pcm = stream.read(OWW_FRAME_LENGTH)[0].flatten()
@@ -53,8 +59,16 @@ def record_after_wake():
             # Process audio through OpenWakeWord
             prediction = oww_model.predict(pcm)
             
+            # Check if we're in cooldown period
+            current_time = time.time()
+            in_cooldown = (current_time - last_detection_time) < COOLDOWN_SECONDS
+            
             # Check if wake word detected (prediction is a dict with model names as keys)
-            if wake_word_name in prediction and prediction[wake_word_name] > WAKE_WORD_THRESHOLD:
+            if (not in_cooldown and 
+                wake_word_name in prediction and 
+                prediction[wake_word_name] > WAKE_WORD_THRESHOLD):
+                
+                last_detection_time = current_time
                 print("[Wake word detected!] Recording...")
                 frames = []
                 silence_counter = 0
@@ -91,6 +105,13 @@ def record_after_wake():
                     wf.writeframes(audio.tobytes())
 
                 print(f"[Audio saved to {OUTPUT_WAV}]")
+                
+                # Flush model state by processing silence frames during cooldown
+                print(f"[Cooldown period: {COOLDOWN_SECONDS}s - flushing model state...]")
+                silence_frame = np.zeros(OWW_FRAME_LENGTH, dtype=np.int16)
+                for _ in range(cooldown_frames_to_flush):
+                    oww_model.predict(silence_frame)
+                
                 print("[Resuming wake word detection...]\n")
                 # Continue listening for next wake word (don't break)
     finally:
