@@ -27,52 +27,6 @@ services:
     ports:
       - "6379:6379"
 
-  qdrant:
-    image: qdrant/qdrant:latest
-    ports:
-      - "6333:6333"
-      - "6334:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-    ulimits:
-      nofile: 262144
-
-  # ── Ollama (LLM) ────────────────────────────────────────────────────────────
-
-  ollama:
-    image: ollama/ollama:latest
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
-
-  ollama-init:
-    image: ollama/ollama:latest
-    volumes:
-      - ollama_data:/root/.ollama
-      - ./ollama/init-models.sh:/init-models.sh
-    environment:
-      - OLLAMA_HOST=ollama:11434
-    entrypoint: ["/bin/bash", "/init-models.sh"]
-    depends_on:
-      ollama:
-        condition: service_healthy
-    restart: "no"
-
   # ── n8n (workflow automation) ────────────────────────────────────────────────
   # N8N_HOST is set to 0.0.0.0 (listen on all interfaces) so that other
   # containers (lynx-server) can reach n8n by service name over the Docker
@@ -104,8 +58,6 @@ services:
       - ./ASR:/data/asr
     depends_on:
       - redis
-      - qdrant
-      - ollama
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:5678/healthz"]
       interval: 15s
@@ -133,38 +85,22 @@ services:
     depends_on:
       - redis
 
-  # ── ASR (speech recognition) ─────────────────────────────────────────────────
-
-  asr:
-    build:
-      context: .
-      dockerfile: ./ASR/Dockerfile
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: n8n
+      POSTGRES_PASSWORD: n8npassword
+      POSTGRES_DB: n8n
     ports:
-      - "8002:8002"
+      - "5433:5432"
     volumes:
-      - asr_audio:/app/received_audio
-    environment:
-      - PYTHONUNBUFFERED=1
-    restart: unless-stopped
-
-  # ── Kokoro TTS ───────────────────────────────────────────────────────────────
-
-  kokoro-tts:
-    image: ghcr.io/remsky/kokoro-fastapi-cpu:latest
-    ports:
-      - "8880:8880"
-    restart: unless-stopped
-    environment:
-      - PYTHONUNBUFFERED=1
-
-  # ── DeepFace (face recognition) ──────────────────────────────────────────────
-
-  deepface:
-    image: serengil/deepface:latest
-    platform: linux/amd64
-    ports:
-      - "5000:5000"
-    restart: unless-stopped
+      - postgres_data:/var/lib/postgresql/data
+  adminer:
+      image: adminer
+      restart: unless-stopped
+      ports:
+        - "8080:8080"
 
   # ── Lynx Auth App — Express server ───────────────────────────────────────────
   # Uses the same n8n instance above. Because this server is inside Docker,
@@ -232,7 +168,5 @@ services:
 
 volumes:
   n8n_data:
-  qdrant_data:
-  ollama_data:
-  asr_audio:
   lynx_server_data:
+  postgres_data:

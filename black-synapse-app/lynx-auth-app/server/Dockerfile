@@ -1,16 +1,16 @@
 # ── Stage 1: dependencies ─────────────────────────────────────────────────────
-FROM node:20-alpine AS deps
+FROM node:20-slim AS deps
 
 WORKDIR /app
 
-# better-sqlite3 requires a native build — install build tools
-RUN apk add --no-cache python3 make g++
+# better-sqlite3 requires native build tools
+RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 
 COPY package.json ./
 RUN npm install --omit=dev
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM node:20-alpine
+FROM node:20-slim
 
 WORKDIR /app
 
