@@ -34,20 +34,21 @@ router.delete('/:service', requireAuth, async (req, res) => {
   }
 
   try {
-    // Remove the credential from n8n first
     if (connection.n8n_credential_id) {
       await n8n.deleteCredential(connection.n8n_credential_id);
     }
-
-    // Remove the local record
-    db.prepare('DELETE FROM connections WHERE user_id = ? AND service = ?')
-      .run(req.session.userId, service);
-
-    res.json({ success: true, service });
   } catch (err) {
-    console.error(`Failed to disconnect ${service}:`, err.response?.data || err.message);
-    res.status(500).json({ error: 'Failed to disconnect service. Check n8n API connectivity.' });
+    if (err.response?.status !== 404) {
+      console.error(`Failed to disconnect ${service}:`, err.response?.data || err.message);
+      return res.status(500).json({ error: 'Failed to disconnect service. Check n8n API connectivity.' });
+    }
+    // 404 means it's already gone from n8n — proceed with local cleanup
   }
+
+  db.prepare('DELETE FROM connections WHERE user_id = ? AND service = ?')
+    .run(req.session.userId, service);
+
+  res.json({ success: true, service });
 });
 
 module.exports = router;
