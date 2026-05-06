@@ -23,9 +23,15 @@ import asyncio
 import uuid
 from datetime import datetime
 
-from action_servos import ServoOrchestrator as _ServoOrchestrator
-from action_servos.config import DEFAULT_I2C_BUS, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ
-from .arm_actions import execute_action as _execute_arm_action
+try:
+    from action_servos import ServoOrchestrator as _ServoOrchestrator
+    from action_servos.config import DEFAULT_I2C_BUS, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ
+    from .arm_actions import execute_action as _execute_arm_action
+    _SERVOS_AVAILABLE = True
+except ModuleNotFoundError:
+    _ServoOrchestrator = None  # type: ignore[assignment,misc]
+    _execute_arm_action = None  # type: ignore[assignment]
+    _SERVOS_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
@@ -54,14 +60,18 @@ app.add_middleware(
 pipeline = IngestionPipeline()
 
 # Arm servo orchestrator — None if hardware unavailable (worker still starts cleanly)
-_servo_bus = int(os.getenv("SERVO_I2C_BUS", str(DEFAULT_I2C_BUS)))
-try:
-    _arm_orch = _ServoOrchestrator()
-    _arm_orch.open(_servo_bus, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ)
-    logger.info("Servo orchestrator opened on I2C bus %d", _servo_bus)
-except Exception as _e:
+if _SERVOS_AVAILABLE:
+    _servo_bus = int(os.getenv("SERVO_I2C_BUS", str(DEFAULT_I2C_BUS)))
+    try:
+        _arm_orch = _ServoOrchestrator()
+        _arm_orch.open(_servo_bus, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ)
+        logger.info("Servo orchestrator opened on I2C bus %d", _servo_bus)
+    except Exception as _e:
+        _arm_orch = None
+        logger.warning("Servo hardware unavailable — /arm/action will return 503: %s", _e)
+else:
     _arm_orch = None
-    logger.warning("Servo hardware unavailable — /arm/action will return 503: %s", _e)
+    logger.warning("action_servos module not found — /arm/action will return 503")
 
 # Service URLs for acknowledge endpoint
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")

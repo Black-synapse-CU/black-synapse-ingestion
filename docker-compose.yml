@@ -123,6 +123,7 @@ services:
       N8N_BASE_URL: http://n8n:5678
       # Webhook URL for the send-email workflow (production path, not webhook-test)
       N8N_WEBHOOK_URL: http://n8n:5678/webhook/send-email
+      PERCEPTION_URL: http://host.docker.internal:8089
     ports:
       - "4000:4000"
     volumes:

@@ -993,10 +993,41 @@ async def identify(data: Optional[UploadFile] = File(None), add_if_unknown: bool
     if img is None:
         return {"name": "Unknown", "confidence": 0, "reason": "invalid image"}
 
-    name, confidence = _identify_by_embedding(
-        img, add_if_unknown=add_if_unknown, detector_backend=DEEPFACE_DETECTOR_BACKEND
-    )
-    return {"name": name, "confidence": round(confidence, 2)}
+    df = _get_deepface()
+    if df is None:
+        return {"name": "Unknown", "confidence": 0, "box": None}
+    try:
+        with _deepface_lock:
+            objs = df.represent(
+                img_path=img,
+                model_name=EMBEDDING_MODEL,
+                detector_backend=DEEPFACE_DETECTOR_BACKEND,
+                enforce_detection=False,
+                align=True,
+            )
+    except Exception as exc:
+        log.debug("Identify represent failed: %s", exc)
+        return {"name": "Unknown", "confidence": 0, "box": None}
+
+    if not objs:
+        return {"name": "Unknown", "confidence": 0, "box": None}
+
+    if len(objs) > 1:
+        objs = sorted(
+            objs,
+            key=lambda o: (o.get("facial_area") or {}).get("w", 0) * (o.get("facial_area") or {}).get("h", 0),
+            reverse=True,
+        )
+
+    obj = objs[0]
+    emb = np.array(obj["embedding"], dtype=np.float64)
+    fa = obj.get("facial_area") or {}
+    box = {"x": fa.get("x", 0), "y": fa.get("y", 0), "w": fa.get("w", 0), "h": fa.get("h", 0)} if fa.get("w") else None
+
+    with _embeddings_lock:
+        name, confidence = _match_embedding(emb, add_if_unknown)
+
+    return {"name": name, "confidence": round(confidence, 2), "box": box}
 
 
 @app.post("/identify-multi")
@@ -1181,6 +1212,107 @@ async def register_face(request: Request):
         "ok": False,
         "message": "I see multiple people. Can you come closer so I can recognize you, or introduce yourself when you're the only one in frame?",
         "suggest_reply": "I see multiple people. Can you come closer so I can recognize you, or introduce yourself when you're the only one in frame?",
+    }
+
+
+# ── Direct enrollment (force-add largest face to named user) ─────────
+@app.post("/enroll-direct")
+async def enroll_direct(request: Request):
+    """
+    Force-enroll the largest detected face into the named user's profile.
+    Skips unknown/known logic — always writes to the named user.
+    Used by the web app enrollment flow where the logged-in user is authoritative.
+    """
+    name = None
+    img_bytes = None
+    ct = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ct == "application/json":
+        try:
+            body = await request.json()
+            name = body.get("name") if isinstance(body, dict) else None
+        except Exception:
+            pass
+    else:
+        form = await request.form()
+        name = form.get("name")
+        if isinstance(name, bytes):
+            name = name.decode("utf-8", errors="replace")
+        if not (isinstance(name, str) and name.strip()):
+            name = None
+        for key in ("data", "file", "image"):
+            f = form.get(key)
+            if hasattr(f, "read") and hasattr(f, "filename") and f.filename:
+                img_bytes = await f.read()
+                break
+
+    if not name or not str(name).strip():
+        return JSONResponse({"ok": False, "message": "Name is required."}, status_code=400)
+    name = str(name).strip()
+
+    if not img_bytes:
+        with _buf.lock:
+            frame = _buf.frame
+        if frame is not None:
+            img_bytes = _encode_jpeg(frame)
+    if not img_bytes:
+        return JSONResponse({"ok": False, "message": "No image provided."}, status_code=400)
+
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if img is None:
+        return JSONResponse({"ok": False, "message": "Invalid image."}, status_code=400)
+
+    df = _get_deepface()
+    if df is None:
+        return JSONResponse({"ok": False, "message": "Face recognition not available."}, status_code=503)
+
+    try:
+        with _deepface_lock:
+            objs = df.represent(
+                img_path=img,
+                model_name=EMBEDDING_MODEL,
+                detector_backend=DEEPFACE_DETECTOR_BACKEND,
+                enforce_detection=False,
+                align=True,
+            )
+    except Exception as e:
+        log.warning("enroll-direct represent failed: %s", e)
+        return JSONResponse({"ok": False, "message": "Could not analyze image."}, status_code=500)
+
+    if not objs:
+        return {"ok": False, "message": "No face detected in this frame — try better lighting or move closer."}
+
+    # Always pick the largest face
+    if len(objs) > 1:
+        objs = sorted(
+            objs,
+            key=lambda o: (o.get("facial_area") or {}).get("w", 0) * (o.get("facial_area") or {}).get("h", 0),
+            reverse=True,
+        )
+
+    emb = np.array(objs[0]["embedding"], dtype=np.float64)
+
+    with _embeddings_lock:
+        db = _load_embeddings()
+        entry = db.get(name, {"embeddings": [], "first_seen": time.time()})
+        existing = entry.get("embeddings", [])
+        if len(existing) < MAX_EMBEDDINGS_PER_USER:
+            existing.append(emb.tolist())
+            entry["embeddings"] = existing
+            db[name] = entry
+            _save_embeddings(db)
+            added = True
+        else:
+            added = False
+
+    total = len(db[name]["embeddings"])
+    return {
+        "ok": True,
+        "added": added,
+        "name": name,
+        "total_embeddings": total,
+        "at_cap": not added,
+        "message": f"Added to {name}." if added else f"{name} is at the {MAX_EMBEDDINGS_PER_USER}-embedding cap.",
     }
 
 

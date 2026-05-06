@@ -12,9 +12,16 @@ import re
 from typing import Optional
 
 from PIL import Image
-from pyzbar.pyzbar import decode as pyzbar_decode
 
 logger = logging.getLogger(__name__)
+
+try:
+    from pyzbar.pyzbar import decode as pyzbar_decode
+    _PYZBAR_AVAILABLE = True
+except Exception:
+    pyzbar_decode = None  # type: ignore[assignment]
+    _PYZBAR_AVAILABLE = False
+    logger.warning("pyzbar native libraries not found — QR decoding disabled")
 
 # Simple URL pattern — used to decide whether decoded data should be scraped
 _URL_RE = re.compile(r'^https?://', re.IGNORECASE)
@@ -38,6 +45,8 @@ def decode_qr_from_bytes(image_bytes: bytes) -> list[str]:
     except Exception as exc:
         raise ValueError(f"Cannot open image: {exc}") from exc
 
+    if not _PYZBAR_AVAILABLE:
+        return []
     decoded_objects = pyzbar_decode(image)
     results = []
     for obj in decoded_objects:
