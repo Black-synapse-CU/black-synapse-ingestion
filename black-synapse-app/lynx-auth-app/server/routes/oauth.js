@@ -119,7 +119,8 @@ PROVIDERS.forEach((providerName) => {
       const tokens = await exchangeCode(providerName, code);
       const db = getDb();
       const cfg = providers[providerName];
-      const credData = cfg.buildCredentialData(tokens);
+      const extra = cfg.afterTokenExchange ? await cfg.afterTokenExchange(tokens) : {};
+      const credData = cfg.buildCredentialData(tokens, extra);
 
       const existing = db
         .prepare(
