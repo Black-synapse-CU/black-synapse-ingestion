@@ -156,18 +156,38 @@ async def root():
 async def health_check():
     """Detailed health check including database connections."""
     try:
-        # Check database connections
         postgres_healthy = await pipeline.check_postgres_connection()
-        qdrant_healthy = await pipeline.check_qdrant_connection()
-        
+
         return {
-            "status": "healthy" if postgres_healthy and qdrant_healthy else "unhealthy",
+            "status": "healthy" if postgres_healthy else "unhealthy",
             "postgres": "connected" if postgres_healthy else "disconnected",
-            "qdrant": "connected" if qdrant_healthy else "disconnected"
         }
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+
+@app.get("/debug/ingest")
+async def debug_ingest_status(limit: int = 20):
+    """
+    Recent ingestion activity and overall chunk/document counts.
+
+    Query params:
+      limit  Number of recent log entries to return (default 20)
+    """
+    return await pipeline.get_ingest_status(limit=limit)
+
+
+@app.get("/debug/chunks/{doc_id}")
+async def debug_document_chunks(doc_id: str):
+    """
+    Show every stored chunk for a document: index, character count, text preview,
+    and whether an embedding was saved.
+    """
+    result = await pipeline.get_document_chunks(doc_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
 
 @app.post("/ingest", response_model=IngestionResponse)
 async def ingest_document(

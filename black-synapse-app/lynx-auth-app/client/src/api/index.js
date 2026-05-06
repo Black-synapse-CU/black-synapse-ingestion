@@ -48,6 +48,20 @@ export const uploadFiles = (fileList) => {
 export const deleteUpload = (id) =>
   api.delete(`/api/uploads/${id}`).then((r) => r.data);
 
+// ── Face enrollment ───────────────────────────────────────────────────────────
+
+export const identifyFace = (imageBlob) => {
+  const form = new FormData();
+  form.append('image', imageBlob, 'frame.jpg');
+  return api.post('/api/perception/identify', form).then((r) => r.data);
+};
+
+export const enrollFace = (imageBlob) => {
+  const form = new FormData();
+  form.append('image', imageBlob, 'frame.jpg');
+  return api.post('/api/perception/enroll', form).then((r) => r.data);
+};
+
 // ── OAuth (redirect-based, not axios) ────────────────────────────────────────
 // These just build the URL — the browser does the redirect itself.
 

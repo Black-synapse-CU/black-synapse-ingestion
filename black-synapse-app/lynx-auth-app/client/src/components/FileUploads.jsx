@@ -7,6 +7,25 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function UploadIcon() {
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="17 8 12 3 7 8"/>
+      <line x1="12" y1="3" x2="12" y2="15"/>
+    </svg>
+  );
+}
+
+function FileIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <polyline points="14 2 14 8 20 8"/>
+    </svg>
+  );
+}
+
 export default function FileUploads({ onToast }) {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -38,7 +57,7 @@ export default function FileUploads({ onToast }) {
     setUploading(true);
     try {
       await uploadFiles(files);
-      onToast?.('success', files.length === 1 ? 'File uploaded' : `${files.length} files uploaded`);
+      onToast?.('success', files.length === 1 ? `"${files[0].name}" uploaded` : `${files.length} files uploaded`);
       await load();
     } catch (err) {
       const msg = err.response?.data?.error || err.message || 'Upload failed';
@@ -49,7 +68,7 @@ export default function FileUploads({ onToast }) {
   }
 
   async function handleDelete(id, name) {
-    if (!window.confirm(`Remove “${name}” from the portal?`)) return;
+    if (!window.confirm(`Remove "${name}"?`)) return;
     try {
       await deleteUpload(id);
       onToast?.('success', 'File removed');
@@ -60,84 +79,70 @@ export default function FileUploads({ onToast }) {
   }
 
   return (
-    <section style={styles.section}>
-      <div style={styles.sectionHead}>
-        <h2 style={styles.sectionTitle}>Your uploads</h2>
-        <p style={styles.sectionBlurb}>
-          Drop files here for Lynx workflows or your team. Stored on this server with your account only.
-        </p>
+    <section style={s.section}>
+      <div style={s.head}>
+        <div>
+          <h2 style={s.title}>File uploads</h2>
+          <p style={s.blurb}>PDFs are forwarded to the ingestion worker and embedded into Qdrant.</p>
+        </div>
       </div>
 
       <div
         style={{
-          ...styles.dropzone,
-          borderColor: dragOver ? '#667eea' : '#2d3748',
-          background: dragOver ? 'rgba(102, 126, 234, 0.08)' : '#161922',
+          ...s.dropzone,
+          borderColor: dragOver ? '#7c3aed' : '#21262d',
+          background: dragOver ? 'rgba(124, 58, 237, 0.06)' : '#0d0f14',
+          color: dragOver ? '#7c3aed' : '#484f58',
         }}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragOver(true);
-        }}
+        onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragOver(false);
-          handleFiles(e.dataTransfer.files);
-        }}
+        onDrop={(e) => { e.preventDefault(); setDragOver(false); handleFiles(e.dataTransfer.files); }}
         onClick={() => !uploading && inputRef.current?.click()}
         role="button"
         tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            inputRef.current?.click();
-          }
-        }}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inputRef.current?.click(); } }}
       >
         <input
           ref={inputRef}
           type="file"
           multiple
+          accept=".pdf"
           style={{ display: 'none' }}
-          onChange={(e) => {
-            handleFiles(e.target.files);
-            e.target.value = '';
-          }}
+          onChange={(e) => { handleFiles(e.target.files); e.target.value = ''; }}
         />
-        <span style={styles.dropIcon}>⬆</span>
-        <p style={styles.dropTitle}>{uploading ? 'Uploading…' : 'Click or drag files here'}</p>
-        <p style={styles.dropHint}>Up to 10 files per batch · max size set on server (default 25 MB each)</p>
+        <div style={{ ...s.dropIconWrap, color: dragOver ? '#7c3aed' : '#484f58' }}>
+          {uploading ? <Spinner /> : <UploadIcon />}
+        </div>
+        <p style={s.dropTitle}>{uploading ? 'Uploading…' : 'Drop PDFs here or click to browse'}</p>
+        <p style={s.dropHint}>Up to 10 files · 25 MB each</p>
       </div>
 
       {loading ? (
-        <div style={styles.loadingRow}>
-          <div style={styles.spinner} />
-          <span>Loading files…</span>
+        <div style={s.loadingRow}>
+          <Spinner small />
+          <span style={{ color: '#484f58', fontSize: 13 }}>Loading files…</span>
         </div>
       ) : items.length === 0 ? (
-        <p style={styles.empty}>No files yet.</p>
+        <p style={s.empty}>No files uploaded yet.</p>
       ) : (
-        <ul style={styles.list}>
+        <ul style={s.list}>
           {items.map((f) => (
-            <li key={f.id} style={styles.row}>
-              <div style={styles.rowMain}>
-                <span style={styles.fileName} title={f.originalFilename}>
-                  {f.originalFilename}
-                </span>
-                <span style={styles.meta}>
+            <li key={f.id} style={s.row}>
+              <div style={s.fileIcon}>
+                <FileIcon />
+              </div>
+              <div style={s.rowMain}>
+                <span style={s.fileName} title={f.originalFilename}>{f.originalFilename}</span>
+                <span style={s.rowMeta}>
                   {formatSize(f.sizeBytes)}
-                  {f.createdAt ? ` · ${new Date(f.createdAt).toLocaleString()}` : ''}
+                  {f.createdAt ? ` · ${new Date(f.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}` : ''}
                 </span>
               </div>
-              <div style={styles.rowActions}>
-                <a
-                  href={`${base}/api/uploads/${f.id}/file`}
-                  download={f.originalFilename}
-                  style={styles.linkBtn}
-                >
+              <div style={s.rowActions}>
+                <a href={`${base}/api/uploads/${f.id}/file`} download={f.originalFilename} style={s.downloadBtn}>
                   Download
                 </a>
-                <button type="button" style={styles.dangerBtn} onClick={() => handleDelete(f.id, f.originalFilename)}>
+                <button type="button" style={s.removeBtn} onClick={() => handleDelete(f.id, f.originalFilename)}>
                   Remove
                 </button>
               </div>
@@ -149,92 +154,105 @@ export default function FileUploads({ onToast }) {
   );
 }
 
-const styles = {
+function Spinner({ small }) {
+  const size = small ? 14 : 20;
+  return (
+    <div style={{
+      width: size, height: size,
+      border: `2px solid #21262d`,
+      borderTop: `2px solid #7c3aed`,
+      borderRadius: '50%',
+      animation: 'spin 0.7s linear infinite',
+    }} />
+  );
+}
+
+const s = {
   section: {
     marginTop: 48,
     paddingTop: 32,
-    borderTop: '1px solid #2d3748',
+    borderTop: '1px solid #21262d',
   },
-  sectionHead: {
+  head: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
     marginBottom: 20,
   },
-  sectionTitle: {
-    fontSize: 20,
+  title: {
+    fontSize: 18,
     fontWeight: 700,
-    color: '#e2e8f0',
-    marginBottom: 6,
+    color: '#f0f6fc',
+    marginBottom: 4,
+    letterSpacing: '-0.2px',
   },
-  sectionBlurb: {
-    fontSize: 14,
-    color: '#718096',
-    lineHeight: 1.55,
-    maxWidth: 560,
+  blurb: {
+    fontSize: 13,
+    color: '#484f58',
+    lineHeight: 1.5,
     margin: 0,
   },
   dropzone: {
-    border: '2px dashed #2d3748',
+    border: '1.5px dashed',
     borderRadius: 12,
-    padding: '28px 20px',
+    padding: '32px 20px',
     textAlign: 'center',
     cursor: 'pointer',
-    transition: 'border-color 0.15s, background 0.15s',
+    transition: 'border-color 0.15s, background 0.15s, color 0.15s',
+    userSelect: 'none',
   },
-  dropIcon: {
-    fontSize: 28,
-    display: 'block',
-    marginBottom: 8,
-    opacity: 0.85,
+  dropIconWrap: {
+    display: 'flex',
+    justifyContent: 'center',
+    marginBottom: 10,
+    transition: 'color 0.15s',
   },
   dropTitle: {
-    color: '#e2e8f0',
-    fontSize: 15,
+    color: '#8b949e',
+    fontSize: 14,
     fontWeight: 600,
-    margin: '0 0 6px',
+    margin: '0 0 4px',
   },
   dropHint: {
-    color: '#4a5568',
-    fontSize: 13,
+    color: '#484f58',
+    fontSize: 12,
     margin: 0,
   },
   loadingRow: {
     display: 'flex',
     alignItems: 'center',
-    gap: 12,
-    color: '#718096',
-    fontSize: 14,
+    gap: 10,
     marginTop: 24,
   },
-  spinner: {
-    width: 18,
-    height: 18,
-    border: '2px solid #2d3748',
-    borderTop: '2px solid #667eea',
-    borderRadius: '50%',
-    animation: 'spin 0.8s linear infinite',
-  },
   empty: {
-    color: '#4a5568',
-    fontSize: 14,
-    marginTop: 20,
+    color: '#484f58',
+    fontSize: 13,
+    marginTop: 24,
+    fontStyle: 'italic',
   },
   list: {
     listStyle: 'none',
-    margin: '24px 0 0',
+    margin: '20px 0 0',
     padding: 0,
     display: 'flex',
     flexDirection: 'column',
-    gap: 10,
+    gap: 8,
   },
   row: {
     display: 'flex',
     alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 16,
+    gap: 12,
     flexWrap: 'wrap',
-    background: '#161922',
-    border: '1px solid #2d3748',
-    borderRadius: 8,
+    background: '#0d0f14',
+    border: '1px solid #21262d',
+    borderRadius: 10,
     padding: '12px 14px',
+  },
+  fileIcon: {
+    color: '#484f58',
+    flexShrink: 0,
+    display: 'flex',
+    alignItems: 'center',
   },
   rowMain: {
     minWidth: 0,
@@ -242,40 +260,45 @@ const styles = {
   },
   fileName: {
     display: 'block',
-    color: '#e2e8f0',
-    fontSize: 14,
+    color: '#f0f6fc',
+    fontSize: 13,
     fontWeight: 500,
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
   },
-  meta: {
+  rowMeta: {
     display: 'block',
-    fontSize: 12,
-    color: '#718096',
-    marginTop: 4,
+    fontSize: 11,
+    color: '#484f58',
+    marginTop: 2,
+    fontWeight: 500,
   },
   rowActions: {
     display: 'flex',
-    gap: 10,
+    gap: 8,
     flexShrink: 0,
   },
-  linkBtn: {
-    fontSize: 13,
-    color: '#90cdf4',
+  downloadBtn: {
+    fontSize: 12,
+    fontWeight: 500,
+    color: '#8b949e',
     textDecoration: 'none',
-    padding: '6px 10px',
+    padding: '5px 10px',
     borderRadius: 6,
-    border: '1px solid #2c5282',
-    background: 'rgba(44, 82, 130, 0.25)',
+    border: '1px solid #21262d',
+    background: 'transparent',
+    transition: 'border-color 0.15s',
   },
-  dangerBtn: {
-    fontSize: 13,
-    color: '#feb2b2',
-    padding: '6px 10px',
+  removeBtn: {
+    fontSize: 12,
+    fontWeight: 500,
+    color: '#f85149',
+    padding: '5px 10px',
     borderRadius: 6,
-    border: '1px solid #742a2a',
-    background: 'rgba(116, 42, 42, 0.35)',
+    border: '1px solid rgba(248, 81, 73, 0.25)',
+    background: 'transparent',
     cursor: 'pointer',
+    transition: 'border-color 0.15s',
   },
 };
