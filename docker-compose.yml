@@ -53,6 +53,7 @@ services:
       - EXECUTIONS_TIMEOUT_MAX=600
       - 'NODES_EXCLUDE=["n8n-nodes-base.executeCommand"]'
       - N8N_RESTRICT_FILE_ACCESS_TO=/home/node/.n8n-files;/data/asr
+      - FACE_SERVICE_URL=${FACE_SERVICE_URL:-http://raspberrypi.local:8003}
     volumes:
       - n8n_data:/home/node/.n8n
       - ./ASR:/data/asr
@@ -79,6 +80,7 @@ services:
       - EXECUTIONS_TIMEOUT_MAX=600
       - 'NODES_EXCLUDE=["n8n-nodes-base.executeCommand"]'
       - N8N_RESTRICT_FILE_ACCESS_TO=/home/node/.n8n-files;/data/asr
+      - FACE_SERVICE_URL=${FACE_SERVICE_URL:-http://raspberrypi.local:8003}
     volumes:
       - n8n_data:/home/node/.n8n
       - ./ASR:/data/asr

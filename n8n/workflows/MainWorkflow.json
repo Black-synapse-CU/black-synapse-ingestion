@@ -371,6 +371,70 @@
       ],
       "id": "fe2ec160-1aaa-4fdc-b33d-fb65bd0aad02",
       "name": "Speaker"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FACE_SERVICE_URL }}/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"listening\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-1680, -240],
+      "id": "fa000001-face-0000-0000-000000000001",
+      "name": "Face: Listening",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FACE_SERVICE_URL }}/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"state\": \"echo\", \"text\": \"{{ $json.text || '' }}\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-1368, -240],
+      "id": "fa000002-face-0000-0000-000000000002",
+      "name": "Face: Echo",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FACE_SERVICE_URL }}/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"thinking\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-672, -200],
+      "id": "fa000003-face-0000-0000-000000000003",
+      "name": "Face: Thinking",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FACE_SERVICE_URL }}/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"idle\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [368, 48],
+      "id": "fa000004-face-0000-0000-000000000004",
+      "name": "Face: Idle",
+      "continueOnFail": true
     }
   ],
   "pinData": {},
@@ -393,6 +457,11 @@
             "node": "ASR: Whisper",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Face: Listening",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -402,6 +471,11 @@
         [
           {
             "node": "Get Vision State",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Face: Echo",
             "type": "main",
             "index": 0
           }
@@ -426,6 +500,11 @@
             "node": "LLM - Ollama 3",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Face: Thinking",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -435,6 +514,17 @@
         [
           {
             "node": "Speaker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Speaker": {
+      "main": [
+        [
+          {
+            "node": "Face: Idle",
             "type": "main",
             "index": 0
           }
