@@ -121,16 +121,16 @@ class ArmVisualizer:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Robotic arm raw pulse visualizer")
-    parser.add_argument("--port", default=None,
-                        help="Serial port to drive real hardware (e.g. COM3)")
-    parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--skip-ready", action="store_true")
+    parser.add_argument("--hardware", action="store_true",
+                        help="Drive real servos via I2C (requires PCA9685 connected)")
+    parser.add_argument("--i2c-address", type=lambda x: int(x, 0), default=0x40,
+                        help="PCA9685 I2C address (default: 0x40)")
     args = parser.parse_args()
 
     bridge = None
-    if args.port:
-        from robotic_arm.serial_bridge import SerialBridge
-        bridge = SerialBridge(args.port, args.baud, require_ready=not args.skip_ready)
+    if args.hardware:
+        from robotic_arm.i2c_bridge import I2CBridge
+        bridge = I2CBridge(address=args.i2c_address)
         bridge.open()
 
     try:

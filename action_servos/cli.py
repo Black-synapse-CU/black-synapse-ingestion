@@ -1,4 +1,4 @@
-"""Manual jog on hardware: run from repo root as `python -m action_servos.cli`."""
+"""Manual jog on hardware: run from repo root as `python -m action_servos`."""
 
 from __future__ import annotations
 
@@ -11,58 +11,58 @@ from action_servos.config import (
     DEFAULT_PCA9685_ADDRESS,
     DEFAULT_PWM_FREQUENCY_HZ,
 )
-from action_servos.groups import ServoOrchestrator, presets_head_pose, us_to_normalized
+from action_servos.groups import ServoOrchestrator, us_to_normalized
 from worker.app.arm_actions import execute_action
+
+# All logical arm joints in command order
+_ARM_JOINTS = ("base", "shoulder", "elbow", "wrist_pitch", "wrist_roll", "gripper")
+
+
+def _add_joint_args(p: argparse.ArgumentParser) -> None:
+    """Add --<joint> (normalised) and --<joint>-us flags for all 6 arm joints."""
+    for joint in _ARM_JOINTS:
+        p.add_argument(f"--{joint}", type=float, default=None,
+                       metavar="N", help=f"{joint} normalised -1..1")
+        p.add_argument(f"--{joint.replace('_', '-')}-us", type=float, default=None,
+                       dest=f"{joint}_us", metavar="µs",
+                       help=f"{joint} pulse microseconds")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Jog PCA9685 arm + head servos")
-    parser.add_argument("--bus", type=int, default=DEFAULT_I2C_BUS, help="I2C bus number")
-    parser.add_argument(
-        "--address",
-        type=lambda x: int(x, 0),
-        default=DEFAULT_PCA9685_ADDRESS,
-        help="PCA9685 address (e.g. 0x40)",
-    )
-    parser.add_argument(
-        "--hz",
-        type=float,
-        default=DEFAULT_PWM_FREQUENCY_HZ,
-        help="PWM frequency (Hz), typically 50 for hobby servos",
-    )
-    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    parser = argparse.ArgumentParser(description="Jog 6-DOF PCA9685 arm servos")
+    parser.add_argument("--bus",     type=int,            default=DEFAULT_I2C_BUS)
+    parser.add_argument("--address", type=lambda x: int(x, 0), default=DEFAULT_PCA9685_ADDRESS,
+                        help="PCA9685 I2C address (e.g. 0x40)")
+    parser.add_argument("--hz",      type=float,          default=DEFAULT_PWM_FREQUENCY_HZ,
+                        help="PWM frequency Hz (default 50)")
+    parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("center", help="Move arm, head tilt, and ear to center_us")
+    # center
+    sub.add_parser("center", help="Move all joints to centre_us")
 
-    p_arm = sub.add_parser("arm", help="Set arm joints (normalized -1..1 or pulse us)")
-    p_arm.add_argument("--n0", type=float, default=None, help="joint0 normalized -1..1")
-    p_arm.add_argument("--n1", type=float, default=None, help="joint1 normalized -1..1")
-    p_arm.add_argument("--us0", type=float, default=None, help="joint0 pulse microseconds")
-    p_arm.add_argument("--us1", type=float, default=None, help="joint1 pulse microseconds")
+    # arm — set any combination of joints
+    p_arm = sub.add_parser("arm", help="Set one or more arm joints")
+    _add_joint_args(p_arm)
 
-    p_head = sub.add_parser("head", help="Set head pan/tilt (normalized or us)")
-    p_head.add_argument("--pan", type=float, default=None, help="pan -1..1")
-    p_head.add_argument("--tilt", type=float, default=None, help="tilt -1..1")
-    p_head.add_argument("--pan-us", type=float, default=None, dest="pan_us")
-    p_head.add_argument("--tilt-us", type=float, default=None, dest="tilt_us")
-    p_head.add_argument("--pose", type=str, default=None, help="named pose: neutral, look_left, ...")
+    # sequence
+    p_seq = sub.add_parser("sequence",
+                            help="Run a named sequence: rest, neutral, extend, retract, "
+                                 "point, wave, grab, release_grip, release")
+    p_seq.add_argument("name",   type=str, help="sequence name")
+    p_seq.add_argument("--amount", type=int, default=None,
+                       help="percent for extend/retract (0-100)")
 
-    p_ear = sub.add_parser("ear", help="Set ear servo (normalized -1..1 or pulse us)")
-    p_ear.add_argument("-n", type=float, default=None, dest="norm", help="normalized -1..1")
-    p_ear.add_argument("--us", type=float, default=None, dest="us", help="pulse microseconds")
-
-    p_seq = sub.add_parser("sequence", help="Run a named arm sequence (wave, point, rest, extend, retract)")
-    p_seq.add_argument("name", type=str, help="sequence name: wave, point, rest, extend, retract")
-    p_seq.add_argument("--amount", type=int, default=None, help="percent for extend/retract (0-100)")
-
-    for _cmd, _help in (("release", "Cut PWM to joints (servos go limp)"),
-                        ("resume", "Re-engage torque on joints (restores last position)"),
-                        ("reset", "Wake chip + clear FULL_OFF state, re-send last position")):
-        p = sub.add_parser(_cmd, help=_help)
-        p.add_argument("--arm", action="store_true", default=False)
+    # release / resume / reset with optional per-group flags
+    for cmd, help_text in (
+        ("release", "Cut PWM to joints (servos go limp)"),
+        ("resume",  "Re-engage torque on joints (restores last position)"),
+        ("reset",   "Wake chip + clear FULL_OFF, re-send last position"),
+    ):
+        p = sub.add_parser(cmd, help=help_text)
+        p.add_argument("--arm",  action="store_true", default=False)
         p.add_argument("--head", action="store_true", default=False)
-        p.add_argument("--ear", action="store_true", default=False)
+        p.add_argument("--ear",  action="store_true", default=False)
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING)
@@ -71,76 +71,48 @@ def main(argv: list[str] | None = None) -> int:
         orch = ServoOrchestrator()
         orch.open(args.bus, args.address, args.hz)
     except OSError as e:
-        print(f"I2C open failed (bus {args.bus} addr 0x{args.address:02x}): {e}", file=sys.stderr)
+        print(f"I2C open failed (bus {args.bus} addr 0x{args.address:02x}): {e}",
+              file=sys.stderr)
         return 1
 
     try:
         if args.cmd == "center":
             orch.all_center()
+
         elif args.cmd == "arm":
+            L = orch.layout
             arm = orch.arm
-            if args.us0 is not None or args.us1 is not None:
-                s0, s1 = arm.last_pulses
-                if args.us0 is not None:
-                    s0 = args.us0
-                if args.us1 is not None:
-                    s1 = args.us1
-                if s0 is None:
-                    s0 = arm.joint0_spec.center_us
-                if s1 is None:
-                    s1 = arm.joint1_spec.center_us
-                arm.set_pulses(float(s0), float(s1))
-            elif args.n0 is not None or args.n1 is not None:
-                lp = arm.last_pulses
-                n0 = args.n0 if args.n0 is not None else us_to_normalized(arm.joint0_spec, lp[0])
-                n1 = args.n1 if args.n1 is not None else us_to_normalized(arm.joint1_spec, lp[1])
-                arm.set_normalized(n0, n1)
-            else:
-                parser.error("arm: specify --n0/--n1 or --us0/--us1")
-        elif args.cmd == "head":
-            head = orch.head
-            if args.pose:
-                pt = presets_head_pose(args.pose)
-                if pt is None:
-                    parser.error(f"unknown pose {args.pose!r}")
-                head.set_normalized(pt[0], pt[1])
-            elif args.pan_us is not None or args.tilt_us is not None:
-                if args.pan_us is not None and head.pan_spec is None:
-                    parser.error("head: no pan servo wired (--pan-us unsupported)")
-                p, t = head.last_pulses
-                if args.pan_us is not None:
-                    p = args.pan_us
-                if args.tilt_us is not None:
-                    t = args.tilt_us
-                if head.pan_spec is not None and p is None:
-                    p = head.pan_spec.center_us
-                if t is None:
-                    t = head.tilt_spec.center_us
-                pan_f = float(p) if p is not None else 0.0
-                head.set_pulses(pan_f, float(t))
-            elif args.pan is not None or args.tilt is not None:
-                if args.pan is not None and head.pan_spec is None:
-                    parser.error("head: no pan servo wired (--pan unsupported)")
-                lp = head.last_pulses
-                pn = (
-                    args.pan
-                    if args.pan is not None
-                    else us_to_normalized(head.pan_spec, lp[0])
-                    if head.pan_spec is not None
-                    else 0.0
-                )
-                tn = args.tilt if args.tilt is not None else us_to_normalized(head.tilt_spec, lp[1])
-                head.set_normalized(pn, tn)
-            else:
-                parser.error("head: specify --pose, or --pan/--tilt, or --pan-us/--tilt-us")
-        elif args.cmd == "ear":
-            ear = orch.ear
-            if args.us is not None:
-                ear.set_pulse(float(args.us))
-            elif args.norm is not None:
-                ear.set_normalized(float(args.norm))
-            else:
-                parser.error("ear: specify -n or --us")
+            s = arm.last_state
+
+            # Build target for each joint: prefer µs arg, then normalised arg, then current state
+            def _resolve(joint: str, spec_attr: str) -> float:
+                spec = getattr(L, spec_attr)
+                us_val   = getattr(args, f"{joint}_us",   None)
+                norm_val = getattr(args, joint,            None)
+                state_val = getattr(s, joint if joint != "shoulder" else "shoulder", None)
+                if us_val is not None:
+                    return float(us_val)
+                if norm_val is not None:
+                    from action_servos.groups import normalized_to_us
+                    return normalized_to_us(spec, norm_val)
+                return state_val if state_val is not None else spec.center_us
+
+            any_set = any(
+                getattr(args, j, None) is not None or getattr(args, f"{j}_us", None) is not None
+                for j in _ARM_JOINTS
+            )
+            if not any_set:
+                parser.error("arm: specify at least one joint flag (--shoulder, --elbow-us, …)")
+
+            arm.set_all(
+                _resolve("base",        "base"),
+                _resolve("shoulder",    "shoulder_a"),
+                _resolve("elbow",       "elbow"),
+                _resolve("wrist_pitch", "wrist_pitch"),
+                _resolve("wrist_roll",  "wrist_roll"),
+                _resolve("gripper",     "gripper"),
+            )
+
         elif args.cmd == "sequence":
             try:
                 result = execute_action(orch, args.name, args.amount)
@@ -148,31 +120,33 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError as e:
                 print(f"error: {e}", file=sys.stderr)
                 return 1
+
         elif args.cmd in ("release", "resume", "reset"):
-            # If no joint flags given, apply to all.
-            all_joints = not (args.arm or args.head or args.ear)
+            all_groups = not (args.arm or args.head or args.ear)
+
             if args.cmd == "release":
-                if args.arm or all_joints:
-                    orch.arm.release()
-                if args.head or all_joints:
-                    orch.head.release()
-                if args.ear or all_joints:
-                    orch.ear.release()
+                if args.arm  or all_groups: orch.arm.release()
+                if args.head or all_groups:
+                    if orch._head_ctl: orch._head_ctl.release()
+                if args.ear  or all_groups:
+                    if orch._ear_ctl:  orch._ear_ctl.release()
+
             elif args.cmd == "resume":
-                if args.arm or all_joints:
-                    orch.arm.resume()
-                if args.head or all_joints:
-                    orch.head.resume()
-                if args.ear or all_joints:
-                    orch.ear.resume()
-            else:
-                if args.arm or all_joints:
-                    orch.arm.reset()
-                if args.head or all_joints:
-                    orch.head.reset()
-                if args.ear or all_joints:
-                    orch.ear.reset()
+                if args.arm  or all_groups: orch.arm.resume()
+                if args.head or all_groups:
+                    if orch._head_ctl: orch._head_ctl.resume()
+                if args.ear  or all_groups:
+                    if orch._ear_ctl:  orch._ear_ctl.resume()
+
+            else:  # reset
+                if args.arm  or all_groups: orch.arm.reset()
+                if args.head or all_groups:
+                    if orch._head_ctl: orch._head_ctl.reset()
+                if args.ear  or all_groups:
+                    if orch._ear_ctl:  orch._ear_ctl.reset()
+
         return 0
+
     finally:
         orch.close()
 

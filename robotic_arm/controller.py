@@ -1,26 +1,35 @@
-"""High-level robotic arm controller over the Arduino serial bridge."""
+"""High-level robotic arm controller over an I2C or serial bridge."""
 
 from __future__ import annotations
 
 import logging
 import time
 from typing import Dict, Optional
+from typing import Protocol, runtime_checkable
 
 from robotic_arm.config import ArmLayout, JointSpec
-from robotic_arm.serial_bridge import SerialBridge
 
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
+class ArmBridge(Protocol):
+    """Structural interface that any bridge (I2C, serial, mock) must satisfy."""
+
+    def set_channel(self, channel: int, pulse_us: float) -> None: ...
+    def center_all(self) -> None: ...
+    def ping(self) -> bool: ...
+
+
 class RoboticArmController:
     """
-    Controls a 6-DOF arm through a SerialBridge connected to an Arduino.
+    Controls a 6-DOF arm through an ArmBridge (I2CBridge or SerialBridge).
 
-    Joints: base, shoulder, elbow, wrist_rot, wrist_flex, gripper.
+    Joints: base, shoulder1, wrist_tilt, shoulder2, wrist_rotate, elbow.
     Positions are tracked in pulse µs internally; callers can use normalized [-1,1].
     """
 
-    def __init__(self, bridge: SerialBridge, layout: Optional[ArmLayout] = None) -> None:
+    def __init__(self, bridge: ArmBridge, layout: Optional[ArmLayout] = None) -> None:
         self._bridge = bridge
         self.layout = layout or ArmLayout()
         # Track last sent pulse per channel (µs).

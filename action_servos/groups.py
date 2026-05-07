@@ -1,4 +1,4 @@
-"""High-level arm, head (optional pan + tilt), and ear on a shared PCA9685."""
+"""High-level controllers for 6-DOF arm, optional head (pan/tilt), and ear."""
 
 from __future__ import annotations
 
@@ -13,6 +13,10 @@ from action_servos.hardware import PCA9685
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Pulse helpers
+# ---------------------------------------------------------------------------
+
 def clamp_pulse(spec: JointSpec, pulse_us: float) -> float:
     return max(spec.min_us, min(spec.max_us, float(pulse_us)))
 
@@ -26,106 +30,220 @@ def normalized_to_us(spec: JointSpec, n: float) -> float:
 
 
 def us_to_normalized(spec: JointSpec, pulse_us: Optional[float]) -> float:
-    """Inverse of normalized_to_us; missing pulse defaults to 0.0 (center of range)."""
+    """Inverse of normalized_to_us; missing pulse defaults to 0.0 (centre of range)."""
     if pulse_us is None:
         return 0.0
     mid = (spec.min_us + spec.max_us) / 2.0
     half = (spec.max_us - spec.min_us) / 2.0
     if half <= 0:
         return 0.0
-    n = (float(pulse_us) - mid) / half
-    return max(-1.0, min(1.0, n))
+    return max(-1.0, min(1.0, (float(pulse_us) - mid) / half))
 
+
+# ---------------------------------------------------------------------------
+# Arm controller (6 DOF, 7 physical servos)
+# ---------------------------------------------------------------------------
 
 @dataclass
 class ArmState:
-    j0: Optional[float] = None
-    j1: Optional[float] = None
-
-
-@dataclass
-class HeadState:
-    pan: Optional[float] = None
-    tilt: Optional[float] = None
+    base:        Optional[float] = None  # logical shoulder_a pulse used as shoulder reference
+    shoulder:    Optional[float] = None
+    elbow:       Optional[float] = None
+    wrist_pitch: Optional[float] = None
+    wrist_roll:  Optional[float] = None
+    gripper:     Optional[float] = None
 
 
 class ArmController:
-    def __init__(self, pca: PCA9685, j0: JointSpec, j1: JointSpec) -> None:
+    """
+    Controls base rotation (MG995), shoulder (dual DS3225 — primary + mirrored),
+    elbow (MG995), wrist pitch/roll (SG90 each), and gripper (SG90).
+    """
+
+    def __init__(self, pca: PCA9685, layout: ServoLayout) -> None:
         self._pca = pca
-        self._j0 = j0
-        self._j1 = j1
+        self._L = layout
         self._state = ArmState()
         self._released: bool = False
 
-    @property
-    def joint0_spec(self) -> JointSpec:
-        return self._j0
+    # ── shoulder dual-servo helper ──────────────────────────────────────────
+
+    def _write_shoulder(self, pulse_us: float) -> float:
+        """Write to both shoulder servos; returns clamped shoulder_a pulse."""
+        L = self._L
+        u_a = clamp_pulse(L.shoulder_a, pulse_us)
+        self._pca.set_channel_pulse_us(L.shoulder_a.channel, u_a)
+        if L.shoulder_b_inv:
+            mirror = L.shoulder_b.center_us * 2.0 - u_a
+            u_b = clamp_pulse(L.shoulder_b, mirror)
+        else:
+            u_b = clamp_pulse(L.shoulder_b, pulse_us)
+        self._pca.set_channel_pulse_us(L.shoulder_b.channel, u_b)
+        return u_a
+
+    # ── public interface ────────────────────────────────────────────────────
 
     @property
-    def joint1_spec(self) -> JointSpec:
-        return self._j1
+    def last_state(self) -> ArmState:
+        return self._state
 
-    @property
-    def last_pulses(self) -> Tuple[Optional[float], Optional[float]]:
-        return (self._state.j0, self._state.j1)
+    def set_all(
+        self,
+        base_us: float,
+        shoulder_us: float,
+        elbow_us: float,
+        wrist_pitch_us: float,
+        wrist_roll_us: float,
+        gripper_us: float,
+    ) -> None:
+        L = self._L
+        b  = clamp_pulse(L.base,        base_us)
+        el = clamp_pulse(L.elbow,       elbow_us)
+        wp = clamp_pulse(L.wrist_pitch, wrist_pitch_us)
+        wr = clamp_pulse(L.wrist_roll,  wrist_roll_us)
+        gr = clamp_pulse(L.gripper,     gripper_us)
 
-    def set_pulses(self, j0_us: float, j1_us: float) -> None:
-        u0 = clamp_pulse(self._j0, j0_us)
-        u1 = clamp_pulse(self._j1, j1_us)
-        self._pca.set_channel_pulse_us(self._j0.channel, u0)
-        self._pca.set_channel_pulse_us(self._j1.channel, u1)
-        self._state.j0, self._state.j1 = u0, u1
-        logger.debug("arm pulses us: (%.1f, %.1f)", u0, u1)
+        self._pca.set_channel_pulse_us(L.base.channel,        b)
+        sh = self._write_shoulder(shoulder_us)
+        self._pca.set_channel_pulse_us(L.elbow.channel,       el)
+        self._pca.set_channel_pulse_us(L.wrist_pitch.channel, wp)
+        self._pca.set_channel_pulse_us(L.wrist_roll.channel,  wr)
+        self._pca.set_channel_pulse_us(L.gripper.channel,     gr)
 
-    def set_normalized(self, j0: float, j1: float) -> None:
-        self.set_pulses(normalized_to_us(self._j0, j0), normalized_to_us(self._j1, j1))
+        self._state.base        = b
+        self._state.shoulder    = sh
+        self._state.elbow       = el
+        self._state.wrist_pitch = wp
+        self._state.wrist_roll  = wr
+        self._state.gripper     = gr
+        logger.debug("arm set_all b=%.0f sh=%.0f el=%.0f wp=%.0f wr=%.0f gr=%.0f",
+                     b, sh, el, wp, wr, gr)
+
+    def set_normalized(
+        self,
+        base_n: float,
+        shoulder_n: float,
+        elbow_n: float,
+        wrist_pitch_n: float,
+        wrist_roll_n: float,
+        gripper_n: float,
+    ) -> None:
+        L = self._L
+        self.set_all(
+            normalized_to_us(L.base,        base_n),
+            normalized_to_us(L.shoulder_a,  shoulder_n),
+            normalized_to_us(L.elbow,       elbow_n),
+            normalized_to_us(L.wrist_pitch, wrist_pitch_n),
+            normalized_to_us(L.wrist_roll,  wrist_roll_n),
+            normalized_to_us(L.gripper,     gripper_n),
+        )
 
     def center(self) -> None:
-        self.set_pulses(self._j0.center_us, self._j1.center_us)
+        L = self._L
+        self.set_all(
+            L.base.center_us, L.shoulder_a.center_us, L.elbow.center_us,
+            L.wrist_pitch.center_us, L.wrist_roll.center_us, L.gripper.center_us,
+        )
 
     def release(self) -> None:
-        """Cut PWM signal to both arm joints; servos go limp."""
-        self._pca.set_channel_full_off(self._j0.channel)
-        self._pca.set_channel_full_off(self._j1.channel)
+        """Cut PWM to all arm channels; servos go limp."""
+        L = self._L
+        for spec in (L.base, L.shoulder_a, L.shoulder_b, L.elbow,
+                     L.wrist_pitch, L.wrist_roll, L.gripper):
+            self._pca.set_channel_full_off(spec.channel)
         self._released = True
 
     def resume(self) -> None:
-        """Re-engage torque and restore last known position (or center if unknown)."""
-        j0 = self._state.j0 if self._state.j0 is not None else self._j0.center_us
-        j1 = self._state.j1 if self._state.j1 is not None else self._j1.center_us
-        self.set_pulses(j0, j1)
+        """Re-engage torque and restore last known positions (or centre if unknown)."""
+        L = self._L
+        s = self._state
+        self.set_all(
+            s.base        if s.base        is not None else L.base.center_us,
+            s.shoulder    if s.shoulder    is not None else L.shoulder_a.center_us,
+            s.elbow       if s.elbow       is not None else L.elbow.center_us,
+            s.wrist_pitch if s.wrist_pitch is not None else L.wrist_pitch.center_us,
+            s.wrist_roll  if s.wrist_roll  is not None else L.wrist_roll.center_us,
+            s.gripper     if s.gripper     is not None else L.gripper.center_us,
+        )
         self._released = False
 
     def reset(self) -> None:
-        """Wake chip, clear FULL_OFF state, and re-send last known arm position."""
-        j0 = self._state.j0 if self._state.j0 is not None else self._j0.center_us
-        j1 = self._state.j1 if self._state.j1 is not None else self._j1.center_us
-        self._pca.reset_channel(self._j0.channel, j0)
-        self._pca.reset_channel(self._j1.channel, j1)
+        """Wake chip, clear FULL_OFF, and re-send last known positions."""
+        L = self._L
+        s = self._state
+
+        def _r(spec: JointSpec, val: Optional[float]) -> None:
+            self._pca.reset_channel(spec.channel, val if val is not None else spec.center_us)
+
+        _r(L.base,        s.base)
+        _r(L.elbow,       s.elbow)
+        _r(L.wrist_pitch, s.wrist_pitch)
+        _r(L.wrist_roll,  s.wrist_roll)
+        _r(L.gripper,     s.gripper)
+
+        # Shoulder A + mirrored B
+        sh = s.shoulder if s.shoulder is not None else L.shoulder_a.center_us
+        self._pca.reset_channel(L.shoulder_a.channel, sh)
+        if L.shoulder_b_inv:
+            mirror = clamp_pulse(L.shoulder_b, L.shoulder_b.center_us * 2.0 - sh)
+            self._pca.reset_channel(L.shoulder_b.channel, mirror)
+        else:
+            self._pca.reset_channel(L.shoulder_b.channel, clamp_pulse(L.shoulder_b, sh))
+
         self._released = False
 
     def move_ramp(
         self,
-        j0_us: float,
-        j1_us: float,
+        base_us: float,
+        shoulder_us: float,
+        elbow_us: float,
+        wrist_pitch_us: float,
+        wrist_roll_us: float,
+        gripper_us: float,
         duration_s: float = 0.4,
         steps: int = 20,
     ) -> None:
-        t0 = clamp_pulse(self._j0, j0_us)
-        t1 = clamp_pulse(self._j1, j1_us)
-        if self._state.j0 is None or self._state.j1 is None:
-            self.set_pulses(t0, t1)
-            return
-        start0, start1 = self._state.j0, self._state.j1
+        """Linearly interpolate all joints to target over duration_s."""
+        L = self._L
+        s = self._state
+
+        t_b  = clamp_pulse(L.base,        base_us)
+        t_sh = clamp_pulse(L.shoulder_a,  shoulder_us)
+        t_el = clamp_pulse(L.elbow,       elbow_us)
+        t_wp = clamp_pulse(L.wrist_pitch, wrist_pitch_us)
+        t_wr = clamp_pulse(L.wrist_roll,  wrist_roll_us)
+        t_gr = clamp_pulse(L.gripper,     gripper_us)
+
+        s_b  = s.base        if s.base        is not None else t_b
+        s_sh = s.shoulder    if s.shoulder    is not None else t_sh
+        s_el = s.elbow       if s.elbow       is not None else t_el
+        s_wp = s.wrist_pitch if s.wrist_pitch is not None else t_wp
+        s_wr = s.wrist_roll  if s.wrist_roll  is not None else t_wr
+        s_gr = s.gripper     if s.gripper     is not None else t_gr
+
         duration_s = max(0.01, float(duration_s))
         steps = max(2, int(steps))
         for i in range(1, steps + 1):
             a = i / float(steps)
-            self.set_pulses(
-                start0 + (t0 - start0) * a,
-                start1 + (t1 - start1) * a,
+            self.set_all(
+                s_b  + (t_b  - s_b)  * a,
+                s_sh + (t_sh - s_sh) * a,
+                s_el + (t_el - s_el) * a,
+                s_wp + (t_wp - s_wp) * a,
+                s_wr + (t_wr - s_wr) * a,
+                s_gr + (t_gr - s_gr) * a,
             )
             time.sleep(duration_s / steps)
+
+
+# ---------------------------------------------------------------------------
+# Head controller (optional — retained for AtlasAI head assembly)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HeadState:
+    pan:  Optional[float] = None
+    tilt: Optional[float] = None
 
 
 class HeadController:
@@ -161,10 +279,8 @@ class HeadController:
             pu = clamp_pulse(self._pan, pan_us)
             self._pca.set_channel_pulse_us(self._pan.channel, pu)
             self._state.pan = pu
-            logger.debug("head pulses us: pan=%.1f tilt=%.1f", pu, tu)
         else:
             self._state.pan = None
-            logger.debug("head pulses us: (no pan) tilt=%.1f", tu)
 
     def set_normalized(self, pan: float, tilt: float) -> None:
         pan_us = normalized_to_us(self._pan, pan) if self._pan is not None else 0.0
@@ -175,23 +291,20 @@ class HeadController:
         self.set_pulses(pan_c, self._tilt.center_us)
 
     def release(self) -> None:
-        """Cut PWM signal to head joints; servos go limp."""
         self._pca.set_channel_full_off(self._tilt.channel)
         if self._pan is not None:
             self._pca.set_channel_full_off(self._pan.channel)
         self._released = True
 
     def resume(self) -> None:
-        """Re-engage torque and restore last known position (or center if unknown)."""
         tilt = self._state.tilt if self._state.tilt is not None else self._tilt.center_us
-        pan = self._state.pan if self._state.pan is not None else (
+        pan  = self._state.pan  if self._state.pan  is not None else (
             self._pan.center_us if self._pan is not None else 0.0
         )
         self.set_pulses(pan, tilt)
         self._released = False
 
     def reset(self) -> None:
-        """Wake chip, clear FULL_OFF state, and re-send last known head position."""
         tilt = self._state.tilt if self._state.tilt is not None else self._tilt.center_us
         self._pca.reset_channel(self._tilt.channel, tilt)
         if self._pan is not None:
@@ -217,11 +330,15 @@ class HeadController:
         steps = max(2, int(steps))
         for i in range(1, steps + 1):
             a = i / float(steps)
-            new_pan = sp + (pt - sp) * a if self._pan is not None else pt
+            new_pan  = sp + (pt - sp) * a if self._pan is not None else pt
             new_tilt = st + (tt - st) * a
             self.set_pulses(new_pan, new_tilt)
             time.sleep(duration_s / steps)
 
+
+# ---------------------------------------------------------------------------
+# Ear controller
+# ---------------------------------------------------------------------------
 
 @dataclass
 class EarState:
@@ -247,7 +364,6 @@ class EarController:
         u = clamp_pulse(self._spec, pulse_us)
         self._pca.set_channel_pulse_us(self._spec.channel, u)
         self._state.pulse = u
-        logger.debug("ear pulse us: %.1f", u)
 
     def set_normalized(self, n: float) -> None:
         self.set_pulse(normalized_to_us(self._spec, n))
@@ -256,28 +372,20 @@ class EarController:
         self.set_pulse(self._spec.center_us)
 
     def release(self) -> None:
-        """Cut PWM signal to ear servo; servo goes limp."""
         self._pca.set_channel_full_off(self._spec.channel)
         self._released = True
 
     def resume(self) -> None:
-        """Re-engage torque and restore last known position (or center if unknown)."""
         pulse = self._state.pulse if self._state.pulse is not None else self._spec.center_us
         self.set_pulse(pulse)
         self._released = False
 
     def reset(self) -> None:
-        """Wake chip, clear FULL_OFF state, and re-send last known ear position."""
         pulse = self._state.pulse if self._state.pulse is not None else self._spec.center_us
         self._pca.reset_channel(self._spec.channel, pulse)
         self._released = False
 
-    def move_ramp(
-        self,
-        pulse_us: float,
-        duration_s: float = 0.4,
-        steps: int = 20,
-    ) -> None:
+    def move_ramp(self, pulse_us: float, duration_s: float = 0.4, steps: int = 20) -> None:
         t = clamp_pulse(self._spec, pulse_us)
         if self._state.pulse is None:
             self.set_pulse(t)
@@ -291,8 +399,12 @@ class EarController:
             time.sleep(duration_s / steps)
 
 
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
 class ServoOrchestrator:
-    """Shared PCA9685 with arm + head (+ optional ear); use for full-robot presets and estop."""
+    """Shared PCA9685 driving the 6-DOF arm + optional head/ear."""
 
     def __init__(self, layout: Optional[ServoLayout] = None) -> None:
         self.layout = layout or ServoLayout.default_layout()
@@ -306,9 +418,11 @@ class ServoOrchestrator:
         self._pca = PCA9685(bus=bus, address=address, frequency_hz=frequency_hz)
         self._pca.open()
         L = self.layout
-        self._arm_ctl = ArmController(self._pca, L.arm_joint0, L.arm_joint1)
-        self._head_ctl = HeadController(self._pca, L.head_tilt, pan=L.head_pan)
-        self._ear_ctl = EarController(self._pca, L.ear)
+        self._arm_ctl = ArmController(self._pca, L)
+        if L.head_tilt is not None:
+            self._head_ctl = HeadController(self._pca, L.head_tilt, pan=L.head_pan)
+        if L.ear is not None:
+            self._ear_ctl = EarController(self._pca, L.ear)
 
     def close(self) -> None:
         self._arm_ctl = None
@@ -324,7 +438,6 @@ class ServoOrchestrator:
             DEFAULT_PCA9685_ADDRESS,
             DEFAULT_PWM_FREQUENCY_HZ,
         )
-
         self.open(DEFAULT_I2C_BUS, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ)
         return self
 
@@ -334,62 +447,71 @@ class ServoOrchestrator:
     @property
     def pca(self) -> PCA9685:
         if self._pca is None:
-            raise RuntimeError("ServoOrchestrator not opened; call open() or use a context manager")
+            raise RuntimeError("ServoOrchestrator not opened")
         return self._pca
 
     @property
     def arm(self) -> ArmController:
         if self._arm_ctl is None:
-            raise RuntimeError("ServoOrchestrator not opened; call open() or use a context manager")
+            raise RuntimeError("ServoOrchestrator not opened")
         return self._arm_ctl
 
     @property
     def head(self) -> HeadController:
         if self._head_ctl is None:
-            raise RuntimeError("ServoOrchestrator not opened; call open() or use a context manager")
+            raise RuntimeError("No head_tilt spec in layout or orchestrator not opened")
         return self._head_ctl
 
     @property
     def ear(self) -> EarController:
         if self._ear_ctl is None:
-            raise RuntimeError("ServoOrchestrator not opened; call open() or use a context manager")
+            raise RuntimeError("No ear spec in layout or orchestrator not opened")
         return self._ear_ctl
 
     def all_center(self) -> None:
         self.arm.center()
-        self.head.center()
-        self.ear.center()
+        if self._head_ctl is not None:
+            self._head_ctl.center()
+        if self._ear_ctl is not None:
+            self._ear_ctl.center()
 
     def estop_center(self) -> None:
-        """Safe pose: all joints to calibrated center (no chip sleep)."""
+        """Safe pose: all joints to calibrated centre."""
         self.all_center()
 
     def release_all(self) -> None:
-        """Cut PWM to all joints; all servos go limp."""
         self.arm.release()
-        self.head.release()
-        self.ear.release()
+        if self._head_ctl is not None:
+            self._head_ctl.release()
+        if self._ear_ctl is not None:
+            self._ear_ctl.release()
 
     def resume_all(self) -> None:
-        """Re-engage torque on all joints, restoring last known positions."""
         self.arm.resume()
-        self.head.resume()
-        self.ear.resume()
+        if self._head_ctl is not None:
+            self._head_ctl.resume()
+        if self._ear_ctl is not None:
+            self._ear_ctl.resume()
 
     def reset_all(self) -> None:
-        """Wake chip and clear FULL_OFF state on all joints, restoring last known positions."""
         self.arm.reset()
-        self.head.reset()
-        self.ear.reset()
+        if self._head_ctl is not None:
+            self._head_ctl.reset()
+        if self._ear_ctl is not None:
+            self._ear_ctl.reset()
 
+
+# ---------------------------------------------------------------------------
+# Head pose presets
+# ---------------------------------------------------------------------------
 
 def presets_head_pose(name: str) -> Optional[Tuple[float, float]]:
-    """Named (pan, tilt) in normalized [-1, 1]. Extend as needed."""
+    """Named (pan, tilt) in normalised [-1, 1]."""
     poses = {
-        "neutral": (0.0, 0.0),
-        "look_left": (-0.6, 0.0),
-        "look_right": (0.6, 0.0),
-        "look_up": (0.0, -0.5),
-        "look_down": (0.0, 0.5),
+        "neutral":    (0.0,  0.0),
+        "look_left":  (-0.6, 0.0),
+        "look_right": (0.6,  0.0),
+        "look_up":    (0.0, -0.5),
+        "look_down":  (0.0,  0.5),
     }
     return poses.get(name.lower())

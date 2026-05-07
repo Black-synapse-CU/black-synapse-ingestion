@@ -15,6 +15,14 @@ DEFAULT_PWM_FREQUENCY_HZ = 50.0
 DEFAULT_MIN_US = 900
 DEFAULT_MAX_US = 2100
 
+# Per-servo-type safe pulse limits (µs)
+DS3225_MIN_US: float = 500   # 25 kg·cm high-torque digital servo
+DS3225_MAX_US: float = 2500
+MG995_MIN_US:  float = 500   # standard metal-gear servo
+MG995_MAX_US:  float = 2500
+SG90_MIN_US:   float = 600   # micro servo
+SG90_MAX_US:   float = 2400
+
 
 @dataclass(frozen=True)
 class JointSpec:
@@ -34,21 +42,66 @@ class JointSpec:
 
 @dataclass(frozen=True)
 class ServoLayout:
-    """Arm (shoulder + elbow), head tilt (up/down), ear; optional head pan if wired."""
+    """
+    6-DOF arm (7 physical servos) + optional head/ear for AtlasAI robot.
 
-    arm_joint0: JointSpec
-    arm_joint1: JointSpec
-    head_pan: Optional[JointSpec]
-    head_tilt: JointSpec
-    ear: JointSpec
+    Arm joints
+    ----------
+    base        — MG995   — pan rotation (Z-axis)
+    shoulder_a  — DS3225  — primary shoulder lift
+    shoulder_b  — DS3225  — secondary shoulder (mechanically coupled to shoulder_a)
+    elbow       — MG995   — forearm lift
+    wrist_pitch — SG90    — wrist up / down
+    wrist_roll  — SG90    — wrist rotation
+    gripper     — SG90    — open / close
+
+    shoulder_b_inv: if True shoulder_b is physically mirrored so it receives
+                    (2 × center_us − shoulder_a_pulse) to stay synchronised.
+
+    Head / ear (optional, retained for AtlasAI robot head assembly)
+    ---------------------------------------------------------------
+    head_pan    — optional pan servo
+    head_tilt   — optional tilt servo
+    ear         — optional ear servo
+    """
+
+    # Arm — required
+    base:           JointSpec
+    shoulder_a:     JointSpec
+    shoulder_b:     JointSpec
+    elbow:          JointSpec
+    wrist_pitch:    JointSpec
+    wrist_roll:     JointSpec
+    gripper:        JointSpec
+
+    # Arm — optional behaviour flag
+    shoulder_b_inv: bool = True
+
+    # Head / ear — optional
+    head_pan:       Optional[JointSpec] = None
+    head_tilt:      Optional[JointSpec] = None
+    ear:            Optional[JointSpec] = None
 
     @classmethod
     def default_layout(cls) -> ServoLayout:
-        """Channels: head up/down 0, ear 3, elbow 5, shoulder 6; no pan servo."""
+        """
+        Default PCA9685 channel wiring:
+
+          ch 0  base        MG995
+          ch 1  shoulder_a  DS3225  (primary)
+          ch 2  shoulder_b  DS3225  (mirrored)
+          ch 3  elbow       MG995
+          ch 4  wrist_pitch SG90
+          ch 5  wrist_roll  SG90
+          ch 6  gripper     SG90
+        """
         return cls(
-            arm_joint0=JointSpec(6),
-            arm_joint1=JointSpec(5),
-            head_pan=None,
-            head_tilt=JointSpec(8, min_us=1000, max_us=2000),
-            ear=JointSpec(3),
+            base=JointSpec(0, min_us=MG995_MIN_US,   max_us=MG995_MAX_US),
+            shoulder_a=JointSpec(1, min_us=DS3225_MIN_US, max_us=DS3225_MAX_US),
+            shoulder_b=JointSpec(2, min_us=DS3225_MIN_US, max_us=DS3225_MAX_US),
+            elbow=JointSpec(3, min_us=MG995_MIN_US,   max_us=MG995_MAX_US),
+            wrist_pitch=JointSpec(4, min_us=SG90_MIN_US, max_us=SG90_MAX_US),
+            wrist_roll=JointSpec(5, min_us=SG90_MIN_US,  max_us=SG90_MAX_US),
+            gripper=JointSpec(6, min_us=SG90_MIN_US,  max_us=SG90_MAX_US),
+            shoulder_b_inv=True,
         )

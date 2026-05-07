@@ -20,7 +20,7 @@ import json
 import sys
 from pathlib import Path
 
-from robotic_arm.serial_bridge import SerialBridge
+from robotic_arm.i2c_bridge import I2CBridge
 
 CHANNEL_NAMES = {
     0: "base",
@@ -40,7 +40,7 @@ def _ch_label(ch: int) -> str:
     return f"ch{ch} ({name})"
 
 
-def run(bridge: SerialBridge) -> None:
+def run(bridge: I2CBridge) -> None:
     print("\nServo Calibration REPL")
     print("  <ch> <pulse>               → move joint")
     print("  center                     → all channels to 1500 µs")
@@ -122,13 +122,12 @@ def run(bridge: SerialBridge) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Servo calibration REPL")
-    parser.add_argument("--port", required=True, help="Serial port, e.g. COM3")
-    parser.add_argument("--baud", type=int, default=115200)
-    parser.add_argument("--skip-ready", action="store_true")
+    parser.add_argument("--i2c-address", type=lambda x: int(x, 0), default=0x40,
+                        help="PCA9685 I2C address (default: 0x40)")
     args = parser.parse_args()
 
-    bridge = SerialBridge(args.port, args.baud, require_ready=not args.skip_ready)
-    print(f"Connecting to {args.port}…")
+    bridge = I2CBridge(address=args.i2c_address)
+    print(f"Connecting to PCA9685 @ 0x{args.i2c_address:02X}…")
     bridge.open()
     print("Connected.\n")
 

@@ -5,10 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-# Serial port defaults — override via env or pass directly to SerialBridge.
-DEFAULT_SERIAL_PORT = "/dev/ttyUSB0"  # Windows: "COM3", Linux: "/dev/ttyUSB0"
-DEFAULT_BAUD_RATE = 115200
-DEFAULT_TIMEOUT_S = 2.0
+# PCA9685 I2C defaults — override via env or pass directly to I2CBridge.
+DEFAULT_I2C_ADDRESS = 0x40
+DEFAULT_PWM_FREQUENCY = 50  # Hz — standard for hobby servos
 
 # Standard hobby servo pulse range (µs) corresponding to 0°–180°.
 DEFAULT_MIN_US = 500
