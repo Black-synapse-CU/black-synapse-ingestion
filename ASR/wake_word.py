@@ -23,7 +23,22 @@ load_dotenv()
 WAKE_SOUNDS_DIR = Path(__file__).parent / "wake_sounds"
 
 SPEAKER_API_URL = os.getenv("SPEAKER_API_URL", "http://localhost:8001")
-ASR_WS_URL      = os.getenv("ASR_WS_URL",      "ws://localhost:8002/stream")
+FACE_SERVICE_URL = os.getenv("FACE_SERVICE_URL", "http://raspberrypi.local:8003")
+
+def _set_face(state: str, text: str = ""):
+    """Fire-and-forget face state update to the Pi display."""
+    try:
+        import json as _json
+        body = _json.dumps({"state": state, "text": text}).encode()
+        req = urllib.request.Request(
+            f"{FACE_SERVICE_URL}/face/state",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=1.0).close()
+    except Exception:
+        pass
 
 def _interrupt_speaker() -> int:
     """Interrupt the speaker API and return the current epoch value."""
@@ -140,8 +155,9 @@ def record_after_wake():
                 prediction[wake_word_name] > WAKE_WORD_THRESHOLD):
                 
                 last_detection_time = current_time
-                print("[Wake word detected!]")
-                epoch = _interrupt_speaker()
+                print("[Wake word detected!] Interrupting speaker and recording...")
+                _set_face("listening")
+                _interrupt_speaker()
                 _play_wake_chime()
                 frames = []
                 silence_counter = 0
