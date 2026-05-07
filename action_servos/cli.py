@@ -15,7 +15,7 @@ from action_servos.groups import ServoOrchestrator, us_to_normalized
 from worker.app.arm_actions import execute_action
 
 # All logical arm joints in command order
-_ARM_JOINTS = ("base", "shoulder", "elbow", "wrist_pitch", "wrist_roll", "gripper")
+_ARM_JOINTS = ("base", "shoulder", "elbow")
 
 
 def _add_joint_args(p: argparse.ArgumentParser) -> None:
@@ -105,12 +105,9 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error("arm: specify at least one joint flag (--shoulder, --elbow-us, …)")
 
             arm.set_all(
-                _resolve("base",        "base"),
-                _resolve("shoulder",    "shoulder_a"),
-                _resolve("elbow",       "elbow"),
-                _resolve("wrist_pitch", "wrist_pitch"),
-                _resolve("wrist_roll",  "wrist_roll"),
-                _resolve("gripper",     "gripper"),
+                _resolve("base",     "base"),
+                _resolve("shoulder", "shoulder_a"),
+                _resolve("elbow",    "elbow"),
             )
 
         elif args.cmd == "sequence":

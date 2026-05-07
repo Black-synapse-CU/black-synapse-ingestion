@@ -70,9 +70,6 @@ class ServoLayout:
     shoulder_a:     JointSpec
     shoulder_b:     JointSpec
     elbow:          JointSpec
-    wrist_pitch:    JointSpec
-    wrist_roll:     JointSpec
-    gripper:        JointSpec
 
     # Arm — optional behaviour flag
     shoulder_b_inv: bool = True
@@ -87,21 +84,15 @@ class ServoLayout:
         """
         Hardware-verified PCA9685 channel wiring (from robotic_arm/config.py):
 
-          ch 0  base         500–2500 µs, center=9°  (~600 µs)
-          ch 1  shoulder_a   500–2500 µs, center=1500 µs
-          ch 2  wrist_pitch  500–2500 µs, center=1500 µs  (wrist_tilt)
-          ch 3  shoulder_b   900–1900 µs, center=1400 µs  (shoulder2, independent)
-          ch 4  wrist_roll   500–2500 µs, center=1500 µs  (wrist_rotate)
-          ch 5  elbow        1944–2500 µs, center=2500 µs (130°–180°)
-          ch 6  gripper      600–2400 µs, center=1500 µs
+          ch 0  base        500–2500 µs, center=9°  (~600 µs)
+          ch 1  shoulder_a  500–2500 µs, center=1500 µs
+          ch 3  shoulder_b  900–1900 µs, center=1400 µs  (shoulder2, independent)
+          ch 5  elbow       1944–2500 µs, center=2500 µs (130°–180°)
         """
         return cls(
             base=JointSpec(0, min_us=500.0,  max_us=2500.0, center_us=600.0),
             shoulder_a=JointSpec(1, min_us=500.0,  max_us=2500.0, center_us=1500.0),
             shoulder_b=JointSpec(3, min_us=900.0,  max_us=1900.0, center_us=1400.0),
             elbow=JointSpec(5, min_us=1944.0, max_us=2500.0, center_us=2500.0),
-            wrist_pitch=JointSpec(2, min_us=500.0,  max_us=2500.0, center_us=1500.0),
-            wrist_roll=JointSpec(4, min_us=500.0,  max_us=2500.0, center_us=1500.0),
-            gripper=JointSpec(6, min_us=SG90_MIN_US, max_us=SG90_MAX_US),
             shoulder_b_inv=False,
         )

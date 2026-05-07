@@ -46,19 +46,13 @@ def us_to_normalized(spec: JointSpec, pulse_us: Optional[float]) -> float:
 
 @dataclass
 class ArmState:
-    base:        Optional[float] = None  # logical shoulder_a pulse used as shoulder reference
-    shoulder:    Optional[float] = None
-    elbow:       Optional[float] = None
-    wrist_pitch: Optional[float] = None
-    wrist_roll:  Optional[float] = None
-    gripper:     Optional[float] = None
+    base:     Optional[float] = None
+    shoulder: Optional[float] = None
+    elbow:    Optional[float] = None
 
 
 class ArmController:
-    """
-    Controls base rotation (MG995), shoulder (dual DS3225 — primary + mirrored),
-    elbow (MG995), wrist pitch/roll (SG90 each), and gripper (SG90).
-    """
+    """Controls base rotation, shoulder (dual), and elbow."""
 
     def __init__(self, pca: PCA9685, layout: ServoLayout) -> None:
         self._pca = pca
@@ -92,64 +86,36 @@ class ArmController:
         base_us: float,
         shoulder_us: float,
         elbow_us: float,
-        wrist_pitch_us: float,
-        wrist_roll_us: float,
-        gripper_us: float,
     ) -> None:
         L = self._L
-        b  = clamp_pulse(L.base,        base_us)
-        el = clamp_pulse(L.elbow,       elbow_us)
-        wp = clamp_pulse(L.wrist_pitch, wrist_pitch_us)
-        wr = clamp_pulse(L.wrist_roll,  wrist_roll_us)
-        gr = clamp_pulse(L.gripper,     gripper_us)
+        b  = clamp_pulse(L.base,  base_us)
+        el = clamp_pulse(L.elbow, elbow_us)
 
-        self._pca.set_channel_pulse_us(L.base.channel,        b)
+        self._pca.set_channel_pulse_us(L.base.channel,  b)
         sh = self._write_shoulder(shoulder_us)
-        self._pca.set_channel_pulse_us(L.elbow.channel,       el)
-        self._pca.set_channel_pulse_us(L.wrist_pitch.channel, wp)
-        self._pca.set_channel_pulse_us(L.wrist_roll.channel,  wr)
-        self._pca.set_channel_pulse_us(L.gripper.channel,     gr)
+        self._pca.set_channel_pulse_us(L.elbow.channel, el)
 
-        self._state.base        = b
-        self._state.shoulder    = sh
-        self._state.elbow       = el
-        self._state.wrist_pitch = wp
-        self._state.wrist_roll  = wr
-        self._state.gripper     = gr
-        logger.debug("arm set_all b=%.0f sh=%.0f el=%.0f wp=%.0f wr=%.0f gr=%.0f",
-                     b, sh, el, wp, wr, gr)
+        self._state.base     = b
+        self._state.shoulder = sh
+        self._state.elbow    = el
+        logger.debug("arm set_all b=%.0f sh=%.0f el=%.0f", b, sh, el)
 
-    def set_normalized(
-        self,
-        base_n: float,
-        shoulder_n: float,
-        elbow_n: float,
-        wrist_pitch_n: float,
-        wrist_roll_n: float,
-        gripper_n: float,
-    ) -> None:
+    def set_normalized(self, base_n: float, shoulder_n: float, elbow_n: float) -> None:
         L = self._L
         self.set_all(
-            normalized_to_us(L.base,        base_n),
-            normalized_to_us(L.shoulder_a,  shoulder_n),
-            normalized_to_us(L.elbow,       elbow_n),
-            normalized_to_us(L.wrist_pitch, wrist_pitch_n),
-            normalized_to_us(L.wrist_roll,  wrist_roll_n),
-            normalized_to_us(L.gripper,     gripper_n),
+            normalized_to_us(L.base,       base_n),
+            normalized_to_us(L.shoulder_a, shoulder_n),
+            normalized_to_us(L.elbow,      elbow_n),
         )
 
     def center(self) -> None:
         L = self._L
-        self.set_all(
-            L.base.center_us, L.shoulder_a.center_us, L.elbow.center_us,
-            L.wrist_pitch.center_us, L.wrist_roll.center_us, L.gripper.center_us,
-        )
+        self.set_all(L.base.center_us, L.shoulder_a.center_us, L.elbow.center_us)
 
     def release(self) -> None:
         """Cut PWM to all arm channels; servos go limp."""
         L = self._L
-        for spec in (L.base, L.shoulder_a, L.shoulder_b, L.elbow,
-                     L.wrist_pitch, L.wrist_roll, L.gripper):
+        for spec in (L.base, L.shoulder_a, L.shoulder_b, L.elbow):
             self._pca.set_channel_full_off(spec.channel)
         self._released = True
 
@@ -158,12 +124,9 @@ class ArmController:
         L = self._L
         s = self._state
         self.set_all(
-            s.base        if s.base        is not None else L.base.center_us,
-            s.shoulder    if s.shoulder    is not None else L.shoulder_a.center_us,
-            s.elbow       if s.elbow       is not None else L.elbow.center_us,
-            s.wrist_pitch if s.wrist_pitch is not None else L.wrist_pitch.center_us,
-            s.wrist_roll  if s.wrist_roll  is not None else L.wrist_roll.center_us,
-            s.gripper     if s.gripper     is not None else L.gripper.center_us,
+            s.base     if s.base     is not None else L.base.center_us,
+            s.shoulder if s.shoulder is not None else L.shoulder_a.center_us,
+            s.elbow    if s.elbow    is not None else L.elbow.center_us,
         )
         self._released = False
 
@@ -175,11 +138,8 @@ class ArmController:
         def _r(spec: JointSpec, val: Optional[float]) -> None:
             self._pca.reset_channel(spec.channel, val if val is not None else spec.center_us)
 
-        _r(L.base,        s.base)
-        _r(L.elbow,       s.elbow)
-        _r(L.wrist_pitch, s.wrist_pitch)
-        _r(L.wrist_roll,  s.wrist_roll)
-        _r(L.gripper,     s.gripper)
+        _r(L.base,  s.base)
+        _r(L.elbow, s.elbow)
 
         # Shoulder A + mirrored B
         sh = s.shoulder if s.shoulder is not None else L.shoulder_a.center_us
@@ -197,9 +157,6 @@ class ArmController:
         base_us: float,
         shoulder_us: float,
         elbow_us: float,
-        wrist_pitch_us: float,
-        wrist_roll_us: float,
-        gripper_us: float,
         duration_s: float = 0.4,
         steps: int = 20,
     ) -> None:
@@ -207,19 +164,13 @@ class ArmController:
         L = self._L
         s = self._state
 
-        t_b  = clamp_pulse(L.base,        base_us)
-        t_sh = clamp_pulse(L.shoulder_a,  shoulder_us)
-        t_el = clamp_pulse(L.elbow,       elbow_us)
-        t_wp = clamp_pulse(L.wrist_pitch, wrist_pitch_us)
-        t_wr = clamp_pulse(L.wrist_roll,  wrist_roll_us)
-        t_gr = clamp_pulse(L.gripper,     gripper_us)
+        t_b  = clamp_pulse(L.base,       base_us)
+        t_sh = clamp_pulse(L.shoulder_a, shoulder_us)
+        t_el = clamp_pulse(L.elbow,      elbow_us)
 
-        s_b  = s.base        if s.base        is not None else t_b
-        s_sh = s.shoulder    if s.shoulder    is not None else t_sh
-        s_el = s.elbow       if s.elbow       is not None else t_el
-        s_wp = s.wrist_pitch if s.wrist_pitch is not None else t_wp
-        s_wr = s.wrist_roll  if s.wrist_roll  is not None else t_wr
-        s_gr = s.gripper     if s.gripper     is not None else t_gr
+        s_b  = s.base     if s.base     is not None else t_b
+        s_sh = s.shoulder if s.shoulder is not None else t_sh
+        s_el = s.elbow    if s.elbow    is not None else t_el
 
         duration_s = max(0.01, float(duration_s))
         steps = max(2, int(steps))
@@ -229,9 +180,6 @@ class ArmController:
                 s_b  + (t_b  - s_b)  * a,
                 s_sh + (t_sh - s_sh) * a,
                 s_el + (t_el - s_el) * a,
-                s_wp + (t_wp - s_wp) * a,
-                s_wr + (t_wr - s_wr) * a,
-                s_gr + (t_gr - s_gr) * a,
             )
             time.sleep(duration_s / steps)
 

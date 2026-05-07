@@ -18,61 +18,41 @@ from action_servos.sequences import Pose, Sequence
 # ---------------------------------------------------------------------------
 
 # Rest (arm folded down, out of the way)
-_REST_BASE         =  0.0
-_REST_SHOULDER     = -0.5
-_REST_ELBOW        = -0.8
-_REST_WRIST_PITCH  =  0.0
-_REST_WRIST_ROLL   =  0.0
-_REST_GRIPPER      =  0.5   # half-open
+_REST_BASE     =  0.0
+_REST_SHOULDER = -0.5
+_REST_ELBOW    = -0.8
 
 # Neutral / home (arm horizontal, ready to work)
-_NEUTRAL_BASE         =  0.0
-_NEUTRAL_SHOULDER     =  0.0
-_NEUTRAL_ELBOW        =  0.0
-_NEUTRAL_WRIST_PITCH  =  0.0
-_NEUTRAL_WRIST_ROLL   =  0.0
-_NEUTRAL_GRIPPER      =  0.5
+_NEUTRAL_BASE     = 0.0
+_NEUTRAL_SHOULDER = 0.0
+_NEUTRAL_ELBOW    = 0.0
 
 # Fully extended (arm reaching forward)
-_EXTEND_BASE         =  0.0
-_EXTEND_SHOULDER     =  0.3
-_EXTEND_ELBOW        =  0.7
-_EXTEND_WRIST_PITCH  =  0.0
-_EXTEND_WRIST_ROLL   =  0.0
-_EXTEND_GRIPPER      =  1.0   # open
+_EXTEND_BASE     = 0.0
+_EXTEND_SHOULDER = 0.3
+_EXTEND_ELBOW    = 0.7
 
 # Retracted (arm pulled close to body)
-_RETRACT_BASE         =  0.0
-_RETRACT_SHOULDER     = -0.3
-_RETRACT_ELBOW        = -0.6
-_RETRACT_WRIST_PITCH  =  0.0
-_RETRACT_WRIST_ROLL   =  0.0
-_RETRACT_GRIPPER      = -1.0  # closed
+_RETRACT_BASE     =  0.0
+_RETRACT_SHOULDER = -0.3
+_RETRACT_ELBOW    = -0.6
 
 # Point (shoulder up, elbow partial)
-_POINT_BASE         =  0.0
-_POINT_SHOULDER     =  0.6
-_POINT_ELBOW        =  0.3
-_POINT_WRIST_PITCH  =  0.0
-_POINT_WRIST_ROLL   =  0.0
-_POINT_GRIPPER      = -0.8  # mostly closed / pointing
+_POINT_BASE     = 0.0
+_POINT_SHOULDER = 0.6
+_POINT_ELBOW    = 0.3
 
 
 _SLOW_STEPS = 50   # interpolation points per keyframe — higher = smoother
 
 
-def _pose(orch: ServoOrchestrator,
-          base: float, shoulder: float, elbow: float,
-          wrist_pitch: float, wrist_roll: float, gripper: float) -> Pose:
+def _pose(orch: ServoOrchestrator, base: float, shoulder: float, elbow: float) -> Pose:
     """Build a Pose from normalised values using the current layout."""
     L = orch.layout
     return Pose(
-        base        = normalized_to_us(L.base,        base),
-        shoulder    = normalized_to_us(L.shoulder_a,  shoulder),
-        elbow       = normalized_to_us(L.elbow,       elbow),
-        wrist_pitch = normalized_to_us(L.wrist_pitch, wrist_pitch),
-        wrist_roll  = normalized_to_us(L.wrist_roll,  wrist_roll),
-        gripper     = normalized_to_us(L.gripper,     gripper),
+        base     = normalized_to_us(L.base,       base),
+        shoulder = normalized_to_us(L.shoulder_a, shoulder),
+        elbow    = normalized_to_us(L.elbow,      elbow),
     )
 
 
@@ -81,17 +61,17 @@ def _lerp(a: float, b: float, t: float) -> float:
 
 
 def _wave_sequence(orch: ServoOrchestrator) -> Sequence:
-    def p(sh: float, el: float, wr: float = 0.0) -> Pose:
-        return _pose(orch, 0.0, sh, el, 0.0, wr, 0.5)
+    def p(sh: float, el: float) -> Pose:
+        return _pose(orch, 0.0, sh, el)
 
     return (
         Sequence()
-        .add(p(0.5, 0.3),          duration_s=2.0, steps=_SLOW_STEPS)  # raise arm
-        .add(p(0.5, 0.7,  0.5),    duration_s=1.5, steps=_SLOW_STEPS)  # wave out
-        .add(p(0.5, 0.1, -0.5),    duration_s=1.5, steps=_SLOW_STEPS)  # wave in
-        .add(p(0.5, 0.7,  0.5),    duration_s=1.5, steps=_SLOW_STEPS)  # wave out
-        .add(p(0.5, 0.1, -0.5),    duration_s=1.5, steps=_SLOW_STEPS)  # wave in
-        .add(p(0.0, 0.0),          duration_s=2.0, steps=_SLOW_STEPS)  # return neutral
+        .add(p(0.5, 0.3),  duration_s=2.0, steps=_SLOW_STEPS)  # raise arm
+        .add(p(0.5, 0.7),  duration_s=1.5, steps=_SLOW_STEPS)  # wave out
+        .add(p(0.5, 0.1),  duration_s=1.5, steps=_SLOW_STEPS)  # wave in
+        .add(p(0.5, 0.7),  duration_s=1.5, steps=_SLOW_STEPS)  # wave out
+        .add(p(0.5, 0.1),  duration_s=1.5, steps=_SLOW_STEPS)  # wave in
+        .add(p(0.0, 0.0),  duration_s=2.0, steps=_SLOW_STEPS)  # return neutral
     )
 
 
@@ -106,16 +86,14 @@ def execute_action(orch: ServoOrchestrator, action: str, amount: int | None) -> 
 
     if action == "rest":
         Sequence().add(
-            _pose(orch, _REST_BASE, _REST_SHOULDER, _REST_ELBOW,
-                  _REST_WRIST_PITCH, _REST_WRIST_ROLL, _REST_GRIPPER),
+            _pose(orch, _REST_BASE, _REST_SHOULDER, _REST_ELBOW),
             duration_s=2.5, steps=_SLOW_STEPS,
         ).play(orch)
         return "Arm moved to rest position."
 
     elif action == "neutral":
         Sequence().add(
-            _pose(orch, _NEUTRAL_BASE, _NEUTRAL_SHOULDER, _NEUTRAL_ELBOW,
-                  _NEUTRAL_WRIST_PITCH, _NEUTRAL_WRIST_ROLL, _NEUTRAL_GRIPPER),
+            _pose(orch, _NEUTRAL_BASE, _NEUTRAL_SHOULDER, _NEUTRAL_ELBOW),
             duration_s=2.5, steps=_SLOW_STEPS,
         ).play(orch)
         return "Arm moved to neutral / home position."
@@ -126,11 +104,8 @@ def execute_action(orch: ServoOrchestrator, action: str, amount: int | None) -> 
         Sequence().add(
             _pose(orch,
                   _EXTEND_BASE,
-                  _lerp(0.0, _EXTEND_SHOULDER,    t),
-                  _lerp(0.0, _EXTEND_ELBOW,       t),
-                  _lerp(0.0, _EXTEND_WRIST_PITCH, t),
-                  _EXTEND_WRIST_ROLL,
-                  _EXTEND_GRIPPER),
+                  _lerp(0.0, _EXTEND_SHOULDER, t),
+                  _lerp(0.0, _EXTEND_ELBOW,    t)),
             duration_s=2.5, steps=_SLOW_STEPS,
         ).play(orch)
         return f"Extended arm to {pct}%."
@@ -141,19 +116,15 @@ def execute_action(orch: ServoOrchestrator, action: str, amount: int | None) -> 
         Sequence().add(
             _pose(orch,
                   _RETRACT_BASE,
-                  _lerp(0.0, _RETRACT_SHOULDER,    t),
-                  _lerp(0.0, _RETRACT_ELBOW,       t),
-                  _lerp(0.0, _RETRACT_WRIST_PITCH, t),
-                  _RETRACT_WRIST_ROLL,
-                  _RETRACT_GRIPPER),
+                  _lerp(0.0, _RETRACT_SHOULDER, t),
+                  _lerp(0.0, _RETRACT_ELBOW,    t)),
             duration_s=2.5, steps=_SLOW_STEPS,
         ).play(orch)
         return f"Retracted arm to {pct}%."
 
     elif action == "point":
         Sequence().add(
-            _pose(orch, _POINT_BASE, _POINT_SHOULDER, _POINT_ELBOW,
-                  _POINT_WRIST_PITCH, _POINT_WRIST_ROLL, _POINT_GRIPPER),
+            _pose(orch, _POINT_BASE, _POINT_SHOULDER, _POINT_ELBOW),
             duration_s=2.5, steps=_SLOW_STEPS,
         ).play(orch)
         return "Pointing."
@@ -162,22 +133,6 @@ def execute_action(orch: ServoOrchestrator, action: str, amount: int | None) -> 
         _wave_sequence(orch).play(orch)
         return "Waved."
 
-    elif action == "grab":
-        L = orch.layout
-        Sequence().add(
-            Pose(gripper=normalized_to_us(L.gripper, -1.0)),
-            duration_s=1.0, steps=_SLOW_STEPS,
-        ).play(orch)
-        return "Gripper closed."
-
-    elif action == "release_grip":
-        L = orch.layout
-        Sequence().add(
-            Pose(gripper=normalized_to_us(L.gripper, 1.0)),
-            duration_s=1.0, steps=_SLOW_STEPS,
-        ).play(orch)
-        return "Gripper opened."
-
     elif action == "release":
         orch.arm.release()
         return "Arm torque released. Arm can be moved by hand."
@@ -185,5 +140,5 @@ def execute_action(orch: ServoOrchestrator, action: str, amount: int | None) -> 
     else:
         raise ValueError(
             f"Unknown action '{action}'. "
-            "Valid: rest, neutral, extend, retract, point, wave, grab, release_grip, release."
+            "Valid: rest, neutral, extend, retract, point, wave, release."
         )

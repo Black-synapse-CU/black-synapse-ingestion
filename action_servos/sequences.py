@@ -14,48 +14,37 @@ class Pose:
     """
     Target state for one keyframe.  All fields are pulse µs; None = don't move that joint.
 
-    Arm joints (6 DOF):
-        base, shoulder, elbow, wrist_pitch, wrist_roll, gripper
-    Head / ear (optional):
-        head_tilt, head_pan, ear
+    Arm joints: base, shoulder, elbow
+    Head / ear (optional): head_tilt, head_pan, ear
     """
 
-    base:        Optional[float] = None
-    shoulder:    Optional[float] = None
-    elbow:       Optional[float] = None
-    wrist_pitch: Optional[float] = None
-    wrist_roll:  Optional[float] = None
-    gripper:     Optional[float] = None
-    head_tilt:   Optional[float] = None
-    head_pan:    Optional[float] = None
-    ear:         Optional[float] = None
+    base:      Optional[float] = None
+    shoulder:  Optional[float] = None
+    elbow:     Optional[float] = None
+    head_tilt: Optional[float] = None
+    head_pan:  Optional[float] = None
+    ear:       Optional[float] = None
 
     @classmethod
     def from_normalized(
         cls,
         orch: ServoOrchestrator,
-        base:        Optional[float] = None,
-        shoulder:    Optional[float] = None,
-        elbow:       Optional[float] = None,
-        wrist_pitch: Optional[float] = None,
-        wrist_roll:  Optional[float] = None,
-        gripper:     Optional[float] = None,
-        head_tilt:   Optional[float] = None,
-        head_pan:    Optional[float] = None,
-        ear:         Optional[float] = None,
+        base:      Optional[float] = None,
+        shoulder:  Optional[float] = None,
+        elbow:     Optional[float] = None,
+        head_tilt: Optional[float] = None,
+        head_pan:  Optional[float] = None,
+        ear:       Optional[float] = None,
     ) -> Pose:
         """Convenience constructor accepting normalised [-1, 1] values."""
         L = orch.layout
         return cls(
-            base        = normalized_to_us(L.base,        base)        if base        is not None else None,
-            shoulder    = normalized_to_us(L.shoulder_a,  shoulder)    if shoulder    is not None else None,
-            elbow       = normalized_to_us(L.elbow,       elbow)       if elbow       is not None else None,
-            wrist_pitch = normalized_to_us(L.wrist_pitch, wrist_pitch) if wrist_pitch is not None else None,
-            wrist_roll  = normalized_to_us(L.wrist_roll,  wrist_roll)  if wrist_roll  is not None else None,
-            gripper     = normalized_to_us(L.gripper,     gripper)     if gripper     is not None else None,
-            head_tilt   = normalized_to_us(L.head_tilt,   head_tilt)   if (head_tilt  is not None and L.head_tilt  is not None) else None,
-            head_pan    = normalized_to_us(L.head_pan,    head_pan)    if (head_pan   is not None and L.head_pan   is not None) else None,
-            ear         = normalized_to_us(L.ear,         ear)         if (ear        is not None and L.ear        is not None) else None,
+            base     = normalized_to_us(L.base,       base)     if base     is not None else None,
+            shoulder = normalized_to_us(L.shoulder_a, shoulder) if shoulder is not None else None,
+            elbow    = normalized_to_us(L.elbow,      elbow)    if elbow    is not None else None,
+            head_tilt = normalized_to_us(L.head_tilt, head_tilt) if (head_tilt is not None and L.head_tilt is not None) else None,
+            head_pan  = normalized_to_us(L.head_pan,  head_pan)  if (head_pan  is not None and L.head_pan  is not None) else None,
+            ear       = normalized_to_us(L.ear,       ear)       if (ear       is not None and L.ear       is not None) else None,
         )
 
 
@@ -96,25 +85,16 @@ def _ramp_to_pose(
     s = orch.arm.last_state
 
     # Current arm positions (fallback to centre)
-    cs_b  = s.base        if s.base        is not None else L.base.center_us
-    cs_sh = s.shoulder    if s.shoulder    is not None else L.shoulder_a.center_us
-    cs_el = s.elbow       if s.elbow       is not None else L.elbow.center_us
-    cs_wp = s.wrist_pitch if s.wrist_pitch is not None else L.wrist_pitch.center_us
-    cs_wr = s.wrist_roll  if s.wrist_roll  is not None else L.wrist_roll.center_us
-    cs_gr = s.gripper     if s.gripper     is not None else L.gripper.center_us
+    cs_b  = s.base     if s.base     is not None else L.base.center_us
+    cs_sh = s.shoulder if s.shoulder is not None else L.shoulder_a.center_us
+    cs_el = s.elbow    if s.elbow    is not None else L.elbow.center_us
 
     # Targets (pose fields override current; None means stay)
-    t_b  = clamp_pulse(L.base,        pose.base)        if pose.base        is not None else cs_b
-    t_sh = clamp_pulse(L.shoulder_a,  pose.shoulder)    if pose.shoulder    is not None else cs_sh
-    t_el = clamp_pulse(L.elbow,       pose.elbow)       if pose.elbow       is not None else cs_el
-    t_wp = clamp_pulse(L.wrist_pitch, pose.wrist_pitch) if pose.wrist_pitch is not None else cs_wp
-    t_wr = clamp_pulse(L.wrist_roll,  pose.wrist_roll)  if pose.wrist_roll  is not None else cs_wr
-    t_gr = clamp_pulse(L.gripper,     pose.gripper)     if pose.gripper     is not None else cs_gr
+    t_b  = clamp_pulse(L.base,       pose.base)     if pose.base     is not None else cs_b
+    t_sh = clamp_pulse(L.shoulder_a, pose.shoulder) if pose.shoulder is not None else cs_sh
+    t_el = clamp_pulse(L.elbow,      pose.elbow)    if pose.elbow    is not None else cs_el
 
-    move_arm = any(f is not None for f in (
-        pose.base, pose.shoulder, pose.elbow,
-        pose.wrist_pitch, pose.wrist_roll, pose.gripper,
-    ))
+    move_arm = any(f is not None for f in (pose.base, pose.shoulder, pose.elbow))
 
     # Head / ear targets
     move_head = pose.head_tilt is not None or pose.head_pan is not None
@@ -142,9 +122,6 @@ def _ramp_to_pose(
                 cs_b  + (t_b  - cs_b)  * a,
                 cs_sh + (t_sh - cs_sh) * a,
                 cs_el + (t_el - cs_el) * a,
-                cs_wp + (t_wp - cs_wp) * a,
-                cs_wr + (t_wr - cs_wr) * a,
-                cs_gr + (t_gr - cs_gr) * a,
             )
         if move_head and orch._head_ctl is not None:
             orch._head_ctl.set_pulses(

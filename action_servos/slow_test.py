@@ -42,9 +42,6 @@ def run_sequence(orch: ServoOrchestrator, duration_s: float, steps: int) -> None
         L.base.center_us,
         _shoulder_us(orch, -0.2),
         _elbow_us(orch, -0.2),
-        L.wrist_pitch.center_us,
-        L.wrist_roll.center_us,
-        L.gripper.center_us,
         duration_s=d, steps=s,
     )
 
@@ -53,9 +50,6 @@ def run_sequence(orch: ServoOrchestrator, duration_s: float, steps: int) -> None
         L.base.center_us,
         _shoulder_us(orch, 0.15),
         _elbow_us(orch, 0.12),
-        L.wrist_pitch.center_us,
-        L.wrist_roll.center_us,
-        L.gripper.center_us,
         duration_s=d, steps=s,
     )
 
@@ -76,9 +70,6 @@ def run_sequence(orch: ServoOrchestrator, duration_s: float, steps: int) -> None
         L.base.center_us,
         L.shoulder_a.center_us,
         L.elbow.center_us,
-        L.wrist_pitch.center_us,
-        L.wrist_roll.center_us,
-        L.gripper.center_us,
         duration_s=d, steps=s,
     )
 
