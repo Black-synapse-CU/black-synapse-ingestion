@@ -107,7 +107,7 @@ class ArmLayout:
         default_factory=lambda: JointSpec(2, min_us=500, max_us=2500, name="wrist_tilt")
     )
     shoulder2: JointSpec = field(
-        default_factory=lambda: JointSpec.from_degrees(3, min_deg=0, max_deg=130, center_deg=50, name="shoulder2")
+        default_factory=lambda: JointSpec(3, min_us=900, max_us=1900, center_us=1400, name="shoulder2")
     )
     wrist_rotate: JointSpec = field(
         default_factory=lambda: JointSpec(4, min_us=500, max_us=2500, name="wrist_rotate")
