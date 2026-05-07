@@ -7,6 +7,8 @@ import logging
 import os
 import wave
 
+import time
+
 import httpx
 import numpy as np
 import uvicorn
@@ -18,11 +20,12 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-WHISPER_MODEL     = os.getenv("WHISPER_MODEL",     "small")
+WHISPER_MODEL     = os.getenv("WHISPER_MODEL",     "base.en")
 WHISPER_DEVICE    = os.getenv("WHISPER_DEVICE",    "cuda")
 WHISPER_COMPUTE   = os.getenv("WHISPER_COMPUTE_TYPE", "int8_float16")
 WHISPER_LANGUAGE  = os.getenv("WHISPER_LANGUAGE",  "en")
 N8N_WEBHOOK_URL   = os.getenv("N8N_WEBHOOK_URL",   "http://localhost:5678/webhook/asr-transcript")
+FACE_SERVICE_URL  = os.getenv("FACE_SERVICE_URL",  "http://localhost:8003")
 ASR_HOST          = os.getenv("ASR_HOST",          "0.0.0.0")
 ASR_PORT          = int(os.getenv("ASR_PORT",      "8002"))
 
@@ -45,9 +48,20 @@ def startup():
         MODEL = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
 
 
-def _transcribe_sync(audio_np: np.ndarray) -> str:
+def _transcribe_sync(audio_np: np.ndarray) -> tuple[str, float]:
+    t0 = time.perf_counter()
     segments, _ = MODEL.transcribe(audio_np, language=WHISPER_LANGUAGE, beam_size=5)
-    return " ".join(s.text for s in segments).strip()
+    text = " ".join(s.text for s in segments).strip()
+    elapsed = time.perf_counter() - t0
+    return text, elapsed
+
+
+async def _post_to_face(text: str) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            await client.post(f"{FACE_SERVICE_URL}/face/state", json={"state": "echo", "text": text})
+    except Exception:
+        pass
 
 
 async def _post_to_n8n(text: str, epoch: int) -> None:
@@ -92,13 +106,16 @@ async def stream_audio(ws: WebSocket):
         return
 
     audio_np = np.frombuffer(b"".join(chunks), dtype=np.int16).astype(np.float32) / 32768.0
-    logger.info(f"Transcribing {len(audio_np) / 16000:.1f}s of audio...")
+    audio_duration = len(audio_np) / 16000
+    logger.info(f"Transcribing {audio_duration:.1f}s of audio...")
 
     loop = asyncio.get_event_loop()
-    text = await loop.run_in_executor(None, _transcribe_sync, audio_np)
-    logger.info(f"Transcript: {text}")
+    text, inference_s = await loop.run_in_executor(None, _transcribe_sync, audio_np)
+    rtf = inference_s / audio_duration if audio_duration > 0 else 0.0
+    logger.info(f"Transcript ({inference_s:.3f}s inference, RTF={rtf:.2f}x): {text}")
 
     await ws.send_json({"text": text, "epoch": epoch})
+    asyncio.create_task(_post_to_face(text))
     asyncio.create_task(_post_to_n8n(text, epoch))
 
 
@@ -136,8 +153,11 @@ async def transcribe_http(request: Request):
 
     try:
         audio_np = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        audio_duration = len(audio_np) / 16000
         loop = asyncio.get_event_loop()
-        text = await loop.run_in_executor(None, _transcribe_sync, audio_np)
+        text, inference_s = await loop.run_in_executor(None, _transcribe_sync, audio_np)
+        rtf = inference_s / audio_duration if audio_duration > 0 else 0.0
+        logger.info(f"Transcription done ({inference_s:.3f}s inference, RTF={rtf:.2f}x)")
     except Exception as e:
         logger.error(f"Transcription error: {e}")
         raise HTTPException(status_code=500, detail=f"Transcription failed: {e}")
