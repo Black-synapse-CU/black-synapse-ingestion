@@ -85,23 +85,23 @@ class ServoLayout:
     @classmethod
     def default_layout(cls) -> ServoLayout:
         """
-        Default PCA9685 channel wiring:
+        Hardware-verified PCA9685 channel wiring (from robotic_arm/config.py):
 
-          ch 0  base        MG995
-          ch 1  shoulder_a  DS3225  (primary)
-          ch 2  shoulder_b  DS3225  (mirrored)
-          ch 3  elbow       MG995
-          ch 4  wrist_pitch SG90
-          ch 5  wrist_roll  SG90
-          ch 6  gripper     SG90
+          ch 0  base         500–2500 µs, center=9°  (~600 µs)
+          ch 1  shoulder_a   500–2500 µs, center=1500 µs
+          ch 2  wrist_pitch  500–2500 µs, center=1500 µs  (wrist_tilt)
+          ch 3  shoulder_b   900–1900 µs, center=1400 µs  (shoulder2, independent)
+          ch 4  wrist_roll   500–2500 µs, center=1500 µs  (wrist_rotate)
+          ch 5  elbow        1944–2500 µs, center=2500 µs (130°–180°)
+          ch 6  gripper      600–2400 µs, center=1500 µs
         """
         return cls(
-            base=JointSpec(0, min_us=MG995_MIN_US,   max_us=MG995_MAX_US),
-            shoulder_a=JointSpec(1, min_us=DS3225_MIN_US, max_us=DS3225_MAX_US),
-            shoulder_b=JointSpec(2, min_us=DS3225_MIN_US, max_us=DS3225_MAX_US),
-            elbow=JointSpec(3, min_us=MG995_MIN_US,   max_us=MG995_MAX_US),
-            wrist_pitch=JointSpec(4, min_us=SG90_MIN_US, max_us=SG90_MAX_US),
-            wrist_roll=JointSpec(5, min_us=SG90_MIN_US,  max_us=SG90_MAX_US),
-            gripper=JointSpec(6, min_us=SG90_MIN_US,  max_us=SG90_MAX_US),
-            shoulder_b_inv=True,
+            base=JointSpec(0, min_us=500.0,  max_us=2500.0, center_us=600.0),
+            shoulder_a=JointSpec(1, min_us=500.0,  max_us=2500.0, center_us=1500.0),
+            shoulder_b=JointSpec(3, min_us=900.0,  max_us=1900.0, center_us=1400.0),
+            elbow=JointSpec(5, min_us=1944.0, max_us=2500.0, center_us=2500.0),
+            wrist_pitch=JointSpec(2, min_us=500.0,  max_us=2500.0, center_us=1500.0),
+            wrist_roll=JointSpec(4, min_us=500.0,  max_us=2500.0, center_us=1500.0),
+            gripper=JointSpec(6, min_us=SG90_MIN_US, max_us=SG90_MAX_US),
+            shoulder_b_inv=False,
         )
