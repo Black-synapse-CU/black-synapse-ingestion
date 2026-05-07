@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ log = logging.getLogger("perception")
 app = FastAPI(title="Perception Vision Service")
 
 # ── Tunables ──────────────────────────────────────────────────────────
-CAM_INDEX = int(os.getenv("CAM_INDEX", "0"))
+CAM_INDEX = int(os.getenv("CAM_INDEX", "1"))
 WIDTH = int(os.getenv("CAM_WIDTH", "1920"))
 HEIGHT = int(os.getenv("CAM_HEIGHT", "1080"))
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "90"))
@@ -46,16 +47,26 @@ QR_STREAM_OVERLAY = os.getenv("QR_STREAM_OVERLAY", "true").lower() == "true"
 # When false, uses simple capture loop — inference only via n8n Perception workflow.
 DEEPFACE_STREAM = os.getenv("DEEPFACE_STREAM", "true").lower() == "true"
 STREAM_FRAME_THRESHOLD = int(os.getenv("STREAM_FRAME_THRESHOLD", "1"))
-STREAM_TIME_THRESHOLD = int(os.getenv("STREAM_TIME_THRESHOLD", "5"))
+STREAM_TIME_THRESHOLD = int(os.getenv("STREAM_TIME_THRESHOLD", "1"))
 # Decoupled DeepFace mode: capture/composer runs at PREVIEW_FPS; analysis runs every ANALYSIS_INTERVAL.
 PREVIEW_FPS = int(os.getenv("PREVIEW_FPS", "30"))
-ANALYSIS_INTERVAL = float(os.getenv("ANALYSIS_INTERVAL", "0.12"))
+ANALYSIS_INTERVAL = float(os.getenv("ANALYSIS_INTERVAL", "0.25"))
+STREAM_DEMOGRAPHY = os.getenv("STREAM_DEMOGRAPHY", "false").lower() == "true"
 # Distant faces produce small boxes (pixels); the old default 130 filtered most of them out.
 FACE_MIN_WIDTH = int(os.getenv("FACE_MIN_WIDTH", "48"))
+# Minimum detector confidence to accept a face (filters false positives from enforce_detection=False).
+FACE_DETECTION_CONFIDENCE = float(os.getenv("FACE_DETECTION_CONFIDENCE", "0.75"))
 # DeepFace detector backends: yunet (fast DNN), opencv (Haar cascade), retinaface, mtcnn, ssd, mediapipe, ...
 DEEPFACE_DETECTOR_BACKEND = os.getenv("DEEPFACE_DETECTOR_BACKEND", "yunet").strip() or "yunet"
 # Scale factor applied to frames before face detection (smaller = faster detection, coords scaled back up).
 DETECTION_SCALE = float(os.getenv("DETECTION_SCALE", "0.5"))
+
+# YOLO object detection (workplace items, people, etc.)
+YOLO_ENABLED = os.getenv("YOLO_ENABLED", "true").lower() == "true"
+YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
+YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.45"))
+YOLO_ANALYSIS_INTERVAL = float(os.getenv("YOLO_ANALYSIS_INTERVAL", "0.5"))
+YOLO_INPUT_WIDTH = int(os.getenv("YOLO_INPUT_WIDTH", "640"))
 
 # State storage: JSON file (default) or Redis
 STATE_BACKEND = os.getenv("STATE_BACKEND", "file")
@@ -85,15 +96,23 @@ PROACTIVE_STATE_FILE = os.getenv(
     "PROACTIVE_STATE_FILE",
     str(Path(__file__).resolve().parent.parent / "proactive_state.json"),
 )
-SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.65"))
-CLEAR_PRIMARY_RATIO = float(os.getenv("CLEAR_PRIMARY_RATIO", "1.5"))  # Primary face must be this many times larger than second
-MERGE_SIMILARITY_THRESHOLD = float(os.getenv("MERGE_SIMILARITY_THRESHOLD", "0.62"))  # Merge user_N into name if above this
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.68"))
+LIGHTING_NORMALIZE = os.getenv("LIGHTING_NORMALIZE", "true").lower() == "true"
+CLEAR_PRIMARY_RATIO = float(os.getenv("CLEAR_PRIMARY_RATIO", "1.5"))
+MERGE_SIMILARITY_THRESHOLD = float(os.getenv("MERGE_SIMILARITY_THRESHOLD", "0.65"))
+RECONCILE_THRESHOLD = float(os.getenv("RECONCILE_THRESHOLD", "0.68"))
+RECONCILE_INTERVAL = float(os.getenv("RECONCILE_INTERVAL", "300"))
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "Facenet512")
-MAX_EMBEDDINGS_PER_USER = int(os.getenv("MAX_EMBEDDINGS_PER_USER", "20"))
+MAX_EMBEDDINGS_PER_USER = int(os.getenv("MAX_EMBEDDINGS_PER_USER", "60"))
 _embeddings_lock = threading.Lock()
 # TensorFlow/Keras (DeepFace) is not safe for concurrent inference across threads; without
 # this, /identify + background stream can segfault or exit with no Python traceback.
 _deepface_lock = threading.Lock()
+
+_yolo_model = None
+_yolo_lock = threading.Lock()
+_yolo_results_lock = threading.Lock()
+_yolo_results: dict = {"objects": [], "updated_at": None}
 
 # Redis (optional, used when STATE_BACKEND=redis)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -124,6 +143,68 @@ def _get_deepface():
         except ImportError as exc:
             log.warning("DeepFace not available: %s", exc)
     return _deepface
+
+
+def _get_yolo():
+    global _yolo_model
+    if _yolo_model is None and YOLO_ENABLED:
+        try:
+            from ultralytics import YOLO
+            _yolo_model = YOLO(YOLO_MODEL)
+            log.info("YOLO loaded: %s", YOLO_MODEL)
+        except Exception as exc:
+            log.warning("YOLO not available: %s", exc)
+    return _yolo_model
+
+
+def _normalize_lighting(img: np.ndarray) -> np.ndarray:
+    """CLAHE on the L channel in LAB space — normalizes brightness without touching color."""
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    lab = cv2.merge((clahe.apply(l), a, b))
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+
+def _yolo_analysis_loop():
+    try:
+        _yolo_analysis_loop_inner()
+    except Exception:
+        log.exception("YOLO analysis loop crashed")
+
+
+def _yolo_analysis_loop_inner():
+    model = _get_yolo()
+    if model is None:
+        return
+    while not _shutdown_event.is_set():
+        time.sleep(YOLO_ANALYSIS_INTERVAL)
+        with _raw_lock:
+            snap = None if _latest_raw is None else _latest_raw.copy()
+        if snap is None:
+            continue
+        try:
+            h, w = snap.shape[:2]
+            if w > YOLO_INPUT_WIDTH:
+                scale = YOLO_INPUT_WIDTH / w
+                small = cv2.resize(snap, (YOLO_INPUT_WIDTH, int(h * scale)))
+            else:
+                small, scale = snap, 1.0
+            with _yolo_lock:
+                results = model(small, conf=YOLO_CONFIDENCE, verbose=False)
+            inv = 1.0 / scale
+            objects = []
+            for r in results:
+                for box in r.boxes:
+                    label = model.names[int(box.cls)]
+                    conf = float(box.conf)
+                    x1, y1, x2, y2 = [int(v * inv) for v in box.xyxy[0]]
+                    objects.append({"label": label, "confidence": round(conf, 2), "box": [x1, y1, x2, y2]})
+            with _yolo_results_lock:
+                _yolo_results["objects"] = objects
+                _yolo_results["updated_at"] = time.time()
+        except Exception as exc:
+            log.debug("YOLO inference failed: %s", exc)
 
 
 # ── Shared frame buffer ──────────────────────────────────────────────
@@ -389,6 +470,8 @@ def _identify_all_faces(
     df = _get_deepface()
     if df is None:
         return []
+    if LIGHTING_NORMALIZE:
+        img = _normalize_lighting(img)
     try:
         with _deepface_lock:
             objs = df.represent(
@@ -470,6 +553,78 @@ def _register_face_with_merge(name: str, emb: np.ndarray) -> dict:
     return {"ok": True, "name": name, "merged_from": merged_from}
 
 
+def _is_anon(name: str) -> bool:
+    return name.startswith("user_") and name[5:].isdigit()
+
+
+def _max_similarity_between(embs_a: list, embs_b: list) -> float:
+    """Max cosine similarity across all pairs of embeddings from two entries."""
+    best = 0.0
+    for ea in embs_a:
+        a = np.array(ea, dtype=np.float64)
+        for eb in embs_b:
+            b = np.array(eb, dtype=np.float64)
+            if len(a) == len(b):
+                best = max(best, _cosine_similarity(a, b))
+    return best
+
+
+def _run_reconciliation(threshold: float) -> dict:
+    """
+    Merge duplicate face entries:
+    1. Match anonymous user_N entries into named entries above threshold.
+    2. Cluster remaining user_N duplicates together.
+    Caller must hold _embeddings_lock.
+    """
+    db = _load_embeddings()
+    named = {k: v for k, v in db.items() if not _is_anon(k)}
+    anon  = {k: v for k, v in db.items() if _is_anon(k)}
+    merges = []
+
+    # Pass 1: pull anonymous entries into matching named entries
+    for uid in list(anon.keys()):
+        embs_u = anon[uid].get("embeddings", [])
+        best_name, best_sim = None, 0.0
+        for name, entry in named.items():
+            sim = _max_similarity_between(embs_u, entry.get("embeddings", []))
+            if sim > best_sim:
+                best_sim, best_name = sim, name
+        if best_name and best_sim >= threshold:
+            existing = named[best_name].get("embeddings", [])
+            for e in embs_u:
+                if e not in existing and len(existing) < MAX_EMBEDDINGS_PER_USER:
+                    existing.append(e)
+            named[best_name]["embeddings"] = existing
+            merges.append({"from": uid, "into": best_name, "similarity": round(best_sim, 3)})
+            del anon[uid]
+
+    # Pass 2: cluster remaining anonymous entries together
+    anon_keys = list(anon.keys())
+    absorbed = set()
+    for i, uid_a in enumerate(anon_keys):
+        if uid_a in absorbed:
+            continue
+        embs_a = anon[uid_a].get("embeddings", [])
+        for uid_b in anon_keys[i + 1:]:
+            if uid_b in absorbed:
+                continue
+            sim = _max_similarity_between(embs_a, anon[uid_b].get("embeddings", []))
+            if sim >= threshold:
+                for e in anon[uid_b].get("embeddings", []):
+                    if e not in embs_a and len(embs_a) < MAX_EMBEDDINGS_PER_USER:
+                        embs_a.append(e)
+                anon[uid_a]["embeddings"] = embs_a
+                merges.append({"from": uid_b, "into": uid_a, "similarity": round(sim, 3)})
+                absorbed.add(uid_b)
+
+    for uid in absorbed:
+        del anon[uid]
+
+    _save_embeddings({**named, **anon})
+    remaining = list({**named, **anon}.keys())
+    return {"merged": merges, "remaining": remaining, "threshold": threshold}
+
+
 # ── Camera helpers ────────────────────────────────────────────────────
 def _video_capture(index: int) -> cv2.VideoCapture:
     """Windows: DirectShow. Linux/Jetson: V4L2 (USB webcams). Else: OpenCV default."""
@@ -528,6 +683,7 @@ def _grab_facial_areas(
              int(f["facial_area"]["w"] * inv), int(f["facial_area"]["h"] * inv))
             for f in face_objs
             if f["facial_area"]["w"] * inv > min_w
+            and f.get("confidence", 1.0) >= FACE_DETECTION_CONFIDENCE
         ]
     except Exception:
         return []
@@ -624,10 +780,9 @@ def _deepface_analysis_loop_inner():
 
         now = time.time()
         if in_hold and (now - hold_tic < time_threshold):
-            time_left = int(time_threshold - (now - hold_tic) + 1)
             with _overlay_lock:
                 _overlay_faces = [(box, dict(info)) for box, info in last_faces_data]
-                _overlay_countdown = str(time_left)
+                _overlay_countdown = None
             continue
 
         if in_hold and (now - hold_tic >= time_threshold):
@@ -637,7 +792,35 @@ def _deepface_analysis_loop_inner():
             with _overlay_lock:
                 _overlay_countdown = None
 
-        faces_coords = _grab_facial_areas(snap, detector_backend)
+        # Single DeepFace call: detect + embed all faces at once.
+        # Replaces extract_faces + N*represent with 1*represent.
+        scale = DETECTION_SCALE
+        small = cv2.resize(snap, (0, 0), fx=scale, fy=scale) if scale != 1.0 else snap
+        if LIGHTING_NORMALIZE:
+            small = _normalize_lighting(small)
+        try:
+            with _deepface_lock:
+                raw_objs = df.represent(
+                    img_path=small,
+                    model_name=EMBEDDING_MODEL,
+                    detector_backend=detector_backend,
+                    enforce_detection=False,
+                    align=True,
+                )
+        except Exception:
+            raw_objs = []
+        inv = 1.0 / scale
+        valid_objs = [
+            o for o in raw_objs
+            if o["facial_area"]["w"] * inv >= FACE_MIN_WIDTH
+            and o.get("face_confidence", o.get("confidence", 1.0)) >= FACE_DETECTION_CONFIDENCE
+        ]
+        faces_coords = [
+            (int(o["facial_area"]["x"] * inv), int(o["facial_area"]["y"] * inv),
+             int(o["facial_area"]["w"] * inv), int(o["facial_area"]["h"] * inv))
+            for o in valid_objs
+        ]
+
         if faces_coords:
             arm_count += 1
         else:
@@ -646,44 +829,45 @@ def _deepface_analysis_loop_inner():
         trigger = (
             arm_count > 0
             and arm_count % frame_threshold == 0
-            and faces_coords
+            and valid_objs
         )
         if trigger:
             faces_data = []
-            for (x, y, w, h) in faces_coords:
-                detected_face = snap[y : y + h, x : x + w]
-                name, confidence = _identify_by_embedding(
-                    detected_face, add_if_unknown=True
-                )
-                emotion, age, gender = "neutral", None, None
-                try:
-                    with _deepface_lock:
-                        dem = df.analyze(
-                            detected_face,
-                            actions=("age", "gender", "emotion"),
-                            detector_backend="skip",
-                            enforce_detection=False,
-                            silent=True,
+            with _embeddings_lock:
+                for obj, (x, y, w, h) in zip(valid_objs, faces_coords):
+                    emb = np.array(obj["embedding"], dtype=np.float64)
+                    name, confidence = _match_embedding(emb, add_if_unknown=True)
+                    emotion, age, gender = None, None, None
+                    if STREAM_DEMOGRAPHY:
+                        detected_face = snap[y : y + h, x : x + w]
+                        try:
+                            with _deepface_lock:
+                                dem = df.analyze(
+                                    detected_face,
+                                    actions=("age", "gender", "emotion"),
+                                    detector_backend="skip",
+                                    enforce_detection=False,
+                                    silent=True,
+                                )
+                            if dem and len(dem) > 0:
+                                d = dem[0]
+                                emotion = d.get("dominant_emotion")
+                                age = d.get("age")
+                                gender = (d.get("dominant_gender") or "unknown")[:1]
+                        except Exception as exc:
+                            log.debug("Demography failed: %s", exc)
+                    faces_data.append(
+                        (
+                            (x, y, w, h),
+                            {
+                                "name": name,
+                                "confidence": confidence,
+                                "emotion": emotion,
+                                "age": age,
+                                "gender": gender,
+                            },
                         )
-                    if dem and len(dem) > 0:
-                        d = dem[0]
-                        emotion = d.get("dominant_emotion", "neutral")
-                        age = d.get("age")
-                        gender = (d.get("dominant_gender") or "unknown")[:1]
-                except Exception as exc:
-                    log.debug("Demography failed: %s", exc)
-                faces_data.append(
-                    (
-                        (x, y, w, h),
-                        {
-                            "name": name,
-                            "confidence": confidence,
-                            "emotion": emotion,
-                            "age": age,
-                            "gender": gender,
-                        },
                     )
-                )
             last_faces_data = faces_data
             state_faces = [
                 {
@@ -855,6 +1039,20 @@ def _qr_scan_loop():
         time.sleep(interval)
 
 
+def _reconcile_loop():
+    """Background: periodically merge duplicate user_N entries."""
+    time.sleep(RECONCILE_INTERVAL)
+    while not _shutdown_event.is_set():
+        try:
+            with _embeddings_lock:
+                result = _run_reconciliation(RECONCILE_THRESHOLD)
+            if result["merged"]:
+                log.info("Auto-reconcile merged %d entries: %s", len(result["merged"]), result["merged"])
+        except Exception:
+            log.exception("Reconcile loop error")
+        time.sleep(RECONCILE_INTERVAL)
+
+
 # ── Lifecycle ─────────────────────────────────────────────────────────
 @app.on_event("startup")
 def startup_event():
@@ -904,6 +1102,17 @@ def startup_event():
     else:
         log.info("QR location scan disabled")
 
+    threading.Thread(target=_reconcile_loop, daemon=True, name="reconcile").start()
+    log.info("Auto-reconcile enabled (interval=%.0fs, threshold=%.2f)", RECONCILE_INTERVAL, RECONCILE_THRESHOLD)
+
+    if YOLO_ENABLED:
+        _get_yolo()
+        if _yolo_model is not None:
+            threading.Thread(target=_yolo_analysis_loop, daemon=True, name="yolo-analyze").start()
+            log.info("YOLO enabled (model=%s, interval=%.1fs, conf=%.2f)", YOLO_MODEL, YOLO_ANALYSIS_INTERVAL, YOLO_CONFIDENCE)
+        else:
+            log.warning("YOLO enabled but model unavailable — /scene-objects will return empty")
+
     log.info(
         "State: %s, file: %s, stream_faces: %s, embeddings: %s, stream_mode: %s, preview_fps: %s",
         STATE_BACKEND,
@@ -952,6 +1161,27 @@ def get_stream_faces():
     return _read_stream_face_file()
 
 
+@app.get("/presence")
+def presence():
+    """Who's in the frame: nobody / one / multiple, with face list and staleness flag."""
+    data = _read_stream_face_file()
+    faces = data.get("faces", [])
+    updated_at = data.get("updated_at")
+    stale = updated_at is None or (time.time() - updated_at) > 4.0
+    count = len(faces)
+    who = "nobody" if count == 0 else ("one" if count == 1 else "multiple")
+    return {"who": who, "count": count, "faces": faces, "stale": stale}
+
+
+@app.get("/scene-objects")
+def scene_objects():
+    """Latest YOLO object detections (workplace items, people, etc.)."""
+    with _yolo_results_lock:
+        data = {"objects": list(_yolo_results["objects"]), "updated_at": _yolo_results["updated_at"]}
+    data["stale"] = data["updated_at"] is None or (time.time() - data["updated_at"]) > 5.0
+    return data
+
+
 # ── Proactive greeting state ─────────────────────────────────────────
 @app.get("/proactive-state")
 def get_proactive_state():
@@ -992,6 +1222,8 @@ async def identify(data: Optional[UploadFile] = File(None), add_if_unknown: bool
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         return {"name": "Unknown", "confidence": 0, "reason": "invalid image"}
+    if LIGHTING_NORMALIZE:
+        img = _normalize_lighting(img)
 
     df = _get_deepface()
     if df is None:
@@ -1059,12 +1291,11 @@ async def identify_multi(data: Optional[UploadFile] = File(None), add_if_unknown
 async def register_face(request: Request):
     """
     Register a face with the given name. Uses provided image or latest frame.
-    Accepts JSON body {"name": "..."} or form name=... and optional file.
-    - 0 faces: no new faces to register
-    - 1 unknown: register it
-    - 0 unknowns, 1 face (user_N): merge/rename that user into the name
-    - 2+ unknowns: register only if clear primary (largest ≥ 1.5× second)
-    When registering, merges any matching user_N into the new name.
+    Accepts JSON {"name": "..."} or multipart form with name= and optional image file.
+    - 1 unknown face: registers it
+    - 0 unknowns, 1 known user_N: renames it
+    - 2+ unknowns: registers the largest if it's clearly dominant (1.5× area of next)
+    Merges any matching user_N into the name automatically.
     """
     name = None
     img_bytes = None
@@ -1072,30 +1303,29 @@ async def register_face(request: Request):
     if ct == "application/json":
         try:
             body = await request.json()
-            name = body.get("name") if isinstance(body, dict) else None
+            name = (body.get("name") or "").strip() if isinstance(body, dict) else None
         except Exception:
             pass
     else:
         form = await request.form()
-        name = form.get("name")
-        if isinstance(name, bytes):
-            name = name.decode("utf-8", errors="replace")
-        if isinstance(name, str) and name.strip():
-            pass
-        else:
-            name = None
-        # File can be under "data", "file", or "image"
-        for key in ("data", "file", "image"):
+        raw = form.get("name")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        name = raw.strip() if isinstance(raw, str) else None
+        for key in ("image", "file", "data"):
             f = form.get(key)
-            if hasattr(f, "read") and hasattr(f, "filename") and f.filename:
+            if hasattr(f, "read") and getattr(f, "filename", None):
                 img_bytes = await f.read()
                 break
-    if not name or not str(name).strip():
-        return JSONResponse(
-            {"ok": False, "message": "Name is required."},
-            status_code=400,
-        )
-    name = str(name).strip()
+
+    if not name:
+        return JSONResponse({"ok": False, "message": "Name is required."}, status_code=400)
+
+    if not img_bytes:
+        with _buf.lock:
+            frame = _buf.frame
+        if frame is not None:
+            img_bytes = _encode_jpeg(frame)
 
     if not img_bytes:
         with _buf.lock:
@@ -1115,6 +1345,8 @@ async def register_face(request: Request):
             {"ok": False, "message": "Invalid image."},
             status_code=400,
         )
+    if LIGHTING_NORMALIZE:
+        img = _normalize_lighting(img)
 
     df = _get_deepface()
     if df is None:
@@ -1215,13 +1447,105 @@ async def register_face(request: Request):
     }
 
 
+# ── Face management ──────────────────────────────────────────────────
+@app.delete("/face/{name}")
+def delete_face(name: str):
+    """Delete a face entry (named user or user_N) from the embeddings DB."""
+    with _embeddings_lock:
+        db = _load_embeddings()
+        if name not in db:
+            return JSONResponse({"ok": False, "message": f"'{name}' not found."}, status_code=404)
+        del db[name]
+        _save_embeddings(db)
+    return {"ok": True, "deleted": name}
+
+
+@app.get("/faces")
+def list_faces():
+    """List all known face entries and how many embeddings each has."""
+    with _embeddings_lock:
+        db = _load_embeddings()
+    return {
+        "faces": [
+            {"name": k, "embeddings": len(v.get("embeddings", [])), "first_seen": v.get("first_seen")}
+            for k, v in db.items()
+        ]
+    }
+
+
+@app.post("/merge")
+async def merge_faces(request: Request):
+    """
+    Force-merge source entries into a target name — no similarity check.
+    Body: {"target": "Alice", "sources": ["user_15", "user_16"]}
+    All embeddings from sources are combined into target then sources are deleted.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "JSON body required."}, status_code=400)
+
+    target = (body.get("target") or "").strip()
+    sources = body.get("sources") or []
+    if not target:
+        return JSONResponse({"ok": False, "message": "target is required."}, status_code=400)
+    if not isinstance(sources, list) or not sources:
+        return JSONResponse({"ok": False, "message": "sources list is required."}, status_code=400)
+
+    with _embeddings_lock:
+        db = _load_embeddings()
+        combined = list(db.get(target, {}).get("embeddings", []))
+        merged, not_found = [], []
+        for src in sources:
+            if src not in db:
+                not_found.append(src)
+                continue
+            for e in db[src].get("embeddings", []):
+                if e not in combined:
+                    combined.append(e)
+            merged.append(src)
+
+        if not merged:
+            return JSONResponse({"ok": False, "message": f"None of the sources found: {not_found}"}, status_code=404)
+
+        db[target] = {
+            "embeddings": combined[:MAX_EMBEDDINGS_PER_USER],
+            "first_seen": db.get(target, {}).get("first_seen", time.time()),
+        }
+        for src in merged:
+            del db[src]
+        _save_embeddings(db)
+
+    return {
+        "ok": True,
+        "target": target,
+        "merged": merged,
+        "not_found": not_found,
+        "total_embeddings": len(combined[:MAX_EMBEDDINGS_PER_USER]),
+        "dropped": max(0, len(combined) - MAX_EMBEDDINGS_PER_USER),
+    }
+
+
+@app.post("/reconcile")
+async def reconcile(threshold: float = RECONCILE_THRESHOLD):
+    """
+    Scan all face entries, merge anonymous user_N duplicates into named users
+    or into each other. Uses max pairwise cosine similarity across all embeddings.
+    Optional query param: threshold (default RECONCILE_THRESHOLD).
+    """
+    with _embeddings_lock:
+        result = _run_reconciliation(threshold)
+    log.info("Reconciliation complete: %d merge(s), remaining: %s", len(result["merged"]), result["remaining"])
+    return result
+
+
 # ── Direct enrollment (force-add largest face to named user) ─────────
 @app.post("/enroll-direct")
 async def enroll_direct(request: Request):
     """
     Force-enroll the largest detected face into the named user's profile.
+    Accepts JSON {"name": "..."} or multipart form with name= and optional image file.
     Skips unknown/known logic — always writes to the named user.
-    Used by the web app enrollment flow where the logged-in user is authoritative.
     """
     name = None
     img_bytes = None
@@ -1229,25 +1553,23 @@ async def enroll_direct(request: Request):
     if ct == "application/json":
         try:
             body = await request.json()
-            name = body.get("name") if isinstance(body, dict) else None
+            name = (body.get("name") or "").strip() if isinstance(body, dict) else None
         except Exception:
             pass
     else:
         form = await request.form()
-        name = form.get("name")
-        if isinstance(name, bytes):
-            name = name.decode("utf-8", errors="replace")
-        if not (isinstance(name, str) and name.strip()):
-            name = None
-        for key in ("data", "file", "image"):
+        raw = form.get("name")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        name = raw.strip() if isinstance(raw, str) else None
+        for key in ("image", "file", "data"):
             f = form.get(key)
-            if hasattr(f, "read") and hasattr(f, "filename") and f.filename:
+            if hasattr(f, "read") and getattr(f, "filename", None):
                 img_bytes = await f.read()
                 break
 
-    if not name or not str(name).strip():
+    if not name:
         return JSONResponse({"ok": False, "message": "Name is required."}, status_code=400)
-    name = str(name).strip()
 
     if not img_bytes:
         with _buf.lock:
@@ -1261,6 +1583,8 @@ async def enroll_direct(request: Request):
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
         return JSONResponse({"ok": False, "message": "Invalid image."}, status_code=400)
+    if LIGHTING_NORMALIZE:
+        img = _normalize_lighting(img)
 
     df = _get_deepface()
     if df is None:
@@ -1313,6 +1637,104 @@ async def enroll_direct(request: Request):
         "total_embeddings": total,
         "at_cap": not added,
         "message": f"Added to {name}." if added else f"{name} is at the {MAX_EMBEDDINGS_PER_USER}-embedding cap.",
+    }
+
+
+@app.post("/enroll-frames")
+async def enroll_frames(request: Request):
+    """
+    Live multi-frame enrollment: captures 5 frames over ~2s from the camera,
+    extracts an embedding from each, and saves them all.
+    Accepts JSON {"name": "..."} or multipart form with name=.
+    More robust than single-shot registration.
+    """
+    name = None
+    ct = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ct == "application/json":
+        try:
+            body = await request.json()
+            name = (body.get("name") or "").strip() if isinstance(body, dict) else None
+        except Exception:
+            pass
+    else:
+        form = await request.form()
+        raw = form.get("name")
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", errors="replace")
+        name = raw.strip() if isinstance(raw, str) else None
+
+    if not name:
+        return JSONResponse({"ok": False, "message": "Name is required."}, status_code=400)
+
+    df = _get_deepface()
+    if df is None:
+        return JSONResponse({"ok": False, "message": "Face recognition not available."}, status_code=503)
+
+    N_FRAMES = 5
+    FRAME_INTERVAL = 0.4
+    embeddings_collected: List[np.ndarray] = []
+
+    for i in range(N_FRAMES):
+        with _raw_lock:
+            snap = None if _latest_raw is None else _latest_raw.copy()
+        if snap is not None:
+            try:
+                if LIGHTING_NORMALIZE:
+                    snap = _normalize_lighting(snap)
+                with _deepface_lock:
+                    objs = df.represent(
+                        img_path=snap,
+                        model_name=EMBEDDING_MODEL,
+                        detector_backend=DEEPFACE_DETECTOR_BACKEND,
+                        enforce_detection=False,
+                        align=True,
+                    )
+                if objs:
+                    if len(objs) > 1:
+                        objs = sorted(
+                            objs,
+                            key=lambda o: (o.get("facial_area") or {}).get("w", 0)
+                                         * (o.get("facial_area") or {}).get("h", 0),
+                            reverse=True,
+                        )
+                    emb_raw = objs[0].get("embedding")
+                    fa = objs[0].get("facial_area") or {}
+                    if emb_raw and fa.get("w", 0) >= FACE_MIN_WIDTH:
+                        embeddings_collected.append(np.array(emb_raw, dtype=np.float64))
+            except Exception as exc:
+                log.debug("enroll-frames frame %d failed: %s", i, exc)
+        if i < N_FRAMES - 1:
+            await asyncio.sleep(FRAME_INTERVAL)
+
+    if not embeddings_collected:
+        return {
+            "ok": False,
+            "message": "No face detected across any captured frames — move closer or improve lighting.",
+        }
+
+    with _embeddings_lock:
+        db = _load_embeddings()
+        entry = db.get(name, {"embeddings": [], "first_seen": time.time()})
+        existing: List = entry.get("embeddings", [])
+        added = 0
+        for emb in embeddings_collected:
+            if len(existing) >= MAX_EMBEDDINGS_PER_USER:
+                break
+            el = emb.tolist()
+            if el not in existing:
+                existing.append(el)
+                added += 1
+        entry["embeddings"] = existing
+        db[name] = entry
+        _save_embeddings(db)
+
+    return {
+        "ok": True,
+        "name": name,
+        "frames_captured": len(embeddings_collected),
+        "embeddings_added": added,
+        "total_embeddings": len(existing),
+        "message": f"Enrolled {name} from {added} frame(s).",
     }
 
 

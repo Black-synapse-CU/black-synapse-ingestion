@@ -6,11 +6,9 @@ Utility functions for text processing, embedding generation, and logging for the
 
 import logging
 import os
-import asyncio
 from typing import List, Dict, Any
 import tiktoken
 import httpx
-import numpy as np
 
 def setup_logging():
     """Configure logging for the application."""
@@ -93,12 +91,25 @@ def chunk_text(text: str, tokenizer: tiktoken.Encoding,
     
     return chunks
 
-async def get_embedding(
+async def get_embedding_ollama(
     texts: List[str],
-    ollama_url: str = "http://localhost:11434",
     model: str = "nomic-embed-text",
+    ollama_url: str = "http://localhost:11434",
 ) -> List[List[float]]:
-    """Generate embeddings via Ollama's local embedding model."""
+    """
+    Generate embeddings for a list of texts using a local Ollama model.
+
+    Uses the batch /api/embed endpoint (Ollama 0.1.34+).
+    Model must be pulled first: ollama pull nomic-embed-text
+
+    Args:
+        texts:      Texts to embed
+        model:      Ollama embedding model name
+        ollama_url: Base URL of the Ollama server
+
+    Returns:
+        List of embedding vectors, one per input text
+    """
     if not texts:
         return []
 
@@ -111,7 +122,7 @@ async def get_embedding(
             resp.raise_for_status()
             return resp.json()["embeddings"]
     except Exception as e:
-        logging.error("Failed to generate embeddings via Ollama: %s", e)
+        logging.error("Ollama embedding failed (model=%s): %s", model, e)
         raise
 
 def validate_document_payload(payload: Dict[str, Any]) -> List[str]:
