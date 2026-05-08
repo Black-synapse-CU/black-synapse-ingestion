@@ -15,6 +15,14 @@ DEFAULT_PWM_FREQUENCY_HZ = 50.0
 DEFAULT_MIN_US = 900
 DEFAULT_MAX_US = 2100
 
+# Per-servo-type safe pulse limits (µs)
+DS3225_MIN_US: float = 500   # 25 kg·cm high-torque digital servo
+DS3225_MAX_US: float = 2500
+MG995_MIN_US:  float = 500   # standard metal-gear servo
+MG995_MAX_US:  float = 2500
+SG90_MIN_US:   float = 600   # micro servo
+SG90_MAX_US:   float = 2400
+
 
 @dataclass(frozen=True)
 class JointSpec:
@@ -34,21 +42,32 @@ class JointSpec:
 
 @dataclass(frozen=True)
 class ServoLayout:
-    """Arm (shoulder + elbow), head tilt (up/down), ear; optional head pan if wired."""
+    # Arm — required
+    base:           JointSpec
+    shoulder_a:     JointSpec
+    shoulder_b:     JointSpec
+    elbow:          JointSpec
 
-    arm_joint0: JointSpec
-    arm_joint1: JointSpec
-    head_pan: Optional[JointSpec]
-    head_tilt: JointSpec
-    ear: JointSpec
+    # Arm — optional behaviour flag
+    shoulder_b_inv: bool = True
+
+    # Arm — optional extra joints
+    wrist_tilt:     Optional[JointSpec] = None
+
+    # Head / ear — optional
+    head_pan:       Optional[JointSpec] = None
+    head_tilt:      Optional[JointSpec] = None
+    ear:            Optional[JointSpec] = None
 
     @classmethod
     def default_layout(cls) -> ServoLayout:
-        """Channels: head up/down 0, ear 3, elbow 5, shoulder 6; no pan servo."""
         return cls(
-            arm_joint0=JointSpec(6),
-            arm_joint1=JointSpec(5),
-            head_pan=None,
-            head_tilt=JointSpec(8, min_us=1000, max_us=2000),
-            ear=JointSpec(3),
+            base=JointSpec(0),
+            shoulder_a=JointSpec(1, min_us=1500.0, max_us=2300.0, center_us=1900.0),
+            shoulder_b=JointSpec(3, min_us=1500.0, max_us=2300.0, center_us=1900.0),
+            wrist_tilt=JointSpec(4),
+            elbow=JointSpec(7),
+            shoulder_b_inv=False,
+            head_pan=JointSpec(5,  min_us=1000.0, max_us=2500.0, center_us=1700.0),
+            head_tilt=JointSpec(6, min_us=1200.0, max_us=2500.0, center_us=1700.0),
         )

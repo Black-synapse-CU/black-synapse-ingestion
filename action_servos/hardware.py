@@ -8,7 +8,10 @@ import math
 import time
 from typing import Optional
 
-from smbus2 import SMBus
+try:
+    from smbus2 import SMBus
+except ImportError:  # not available on macOS / non-Jetson dev machines
+    SMBus = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,8 @@ class PCA9685:
     def open(self) -> None:
         if self._bus is not None:
             return
+        if SMBus is None:
+            raise OSError("smbus2 is not installed — hardware access requires a Linux/Jetson device")
         dev = f"/dev/i2c-{self._bus_no}"
         try:
             self._bus = SMBus(self._bus_no)

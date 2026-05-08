@@ -11,33 +11,40 @@ from action_servos.groups import ServoOrchestrator, clamp_pulse, normalized_to_u
 
 @dataclass
 class Pose:
-    """Target state for one keyframe. All fields are pulse µs; None = don't move that joint."""
+    """
+    Target state for one keyframe.  All fields are pulse µs; None = don't move that joint.
 
-    arm_j0: Optional[float] = None
-    arm_j1: Optional[float] = None
+    Arm joints: base, shoulder, elbow
+    Head / ear (optional): head_tilt, head_pan, ear
+    """
+
+    base:      Optional[float] = None
+    shoulder:  Optional[float] = None
+    elbow:     Optional[float] = None
     head_tilt: Optional[float] = None
-    head_pan: Optional[float] = None
-    ear: Optional[float] = None
+    head_pan:  Optional[float] = None
+    ear:       Optional[float] = None
 
     @classmethod
     def from_normalized(
         cls,
         orch: ServoOrchestrator,
-        arm: Optional[tuple[float, float]] = None,
+        base:      Optional[float] = None,
+        shoulder:  Optional[float] = None,
+        elbow:     Optional[float] = None,
         head_tilt: Optional[float] = None,
-        head_pan: Optional[float] = None,
-        ear: Optional[float] = None,
+        head_pan:  Optional[float] = None,
+        ear:       Optional[float] = None,
     ) -> Pose:
-        """Convenience constructor that accepts normalized [-1, 1] values."""
+        """Convenience constructor accepting normalised [-1, 1] values."""
         L = orch.layout
         return cls(
-            arm_j0=normalized_to_us(L.arm_joint0, arm[0]) if arm is not None else None,
-            arm_j1=normalized_to_us(L.arm_joint1, arm[1]) if arm is not None else None,
-            head_tilt=normalized_to_us(L.head_tilt, head_tilt) if head_tilt is not None else None,
-            head_pan=normalized_to_us(L.head_pan, head_pan)
-            if (head_pan is not None and L.head_pan is not None)
-            else None,
-            ear=normalized_to_us(L.ear, ear) if ear is not None else None,
+            base     = normalized_to_us(L.base,       base)     if base     is not None else None,
+            shoulder = normalized_to_us(L.shoulder_a, shoulder) if shoulder is not None else None,
+            elbow    = normalized_to_us(L.elbow,      elbow)    if elbow    is not None else None,
+            head_tilt = normalized_to_us(L.head_tilt, head_tilt) if (head_tilt is not None and L.head_tilt is not None) else None,
+            head_pan  = normalized_to_us(L.head_pan,  head_pan)  if (head_pan  is not None and L.head_pan  is not None) else None,
+            ear       = normalized_to_us(L.ear,       ear)       if (ear       is not None and L.ear       is not None) else None,
         )
 
 
@@ -56,12 +63,7 @@ class Sequence:
 
     keyframes: List[Keyframe] = field(default_factory=list)
 
-    def add(
-        self,
-        pose: Pose,
-        duration_s: float = 0.5,
-        steps: int = 20,
-    ) -> Sequence:
+    def add(self, pose: Pose, duration_s: float = 0.5, steps: int = 20) -> Sequence:
         """Append a keyframe; returns self for chaining."""
         self.keyframes.append(Keyframe(pose=pose, duration_s=duration_s, steps=steps))
         return self
@@ -78,56 +80,55 @@ def _ramp_to_pose(
     duration_s: float,
     steps: int,
 ) -> None:
-    """Ramp all specified joints simultaneously in a single timed loop."""
+    """Ramp all specified joints simultaneously using smoothstep easing."""
     L = orch.layout
+    s = orch.arm.last_state
 
-    # Gather current positions, falling back to center if joint has no prior state.
-    arm_lp = orch.arm.last_pulses
-    s_arm0 = arm_lp[0] if arm_lp[0] is not None else L.arm_joint0.center_us
-    s_arm1 = arm_lp[1] if arm_lp[1] is not None else L.arm_joint1.center_us
+    # Current arm positions (fallback to centre)
+    cs_b  = s.base     if s.base     is not None else L.base.center_us
+    cs_sh = s.shoulder if s.shoulder is not None else L.shoulder_a.center_us
+    cs_el = s.elbow    if s.elbow    is not None else L.elbow.center_us
 
-    head_lp = orch.head.last_pulses
-    s_tilt = head_lp[1] if head_lp[1] is not None else L.head_tilt.center_us
-    s_pan = (
-        head_lp[0]
-        if head_lp[0] is not None
-        else (L.head_pan.center_us if L.head_pan is not None else 0.0)
-    )
+    # Targets (pose fields override current; None means stay)
+    t_b  = clamp_pulse(L.base,       pose.base)     if pose.base     is not None else cs_b
+    t_sh = clamp_pulse(L.shoulder_a, pose.shoulder) if pose.shoulder is not None else cs_sh
+    t_el = clamp_pulse(L.elbow,      pose.elbow)    if pose.elbow    is not None else cs_el
 
-    ear_lp = orch.ear.last_pulse
-    s_ear = ear_lp if ear_lp is not None else L.ear.center_us
+    move_arm = any(f is not None for f in (pose.base, pose.shoulder, pose.elbow))
 
-    # Resolve targets; joints not mentioned in the pose stay at their current position.
-    t_arm0 = clamp_pulse(L.arm_joint0, pose.arm_j0) if pose.arm_j0 is not None else s_arm0
-    t_arm1 = clamp_pulse(L.arm_joint1, pose.arm_j1) if pose.arm_j1 is not None else s_arm1
-    t_tilt = clamp_pulse(L.head_tilt, pose.head_tilt) if pose.head_tilt is not None else s_tilt
-    t_pan = (
-        clamp_pulse(L.head_pan, pose.head_pan)
-        if (pose.head_pan is not None and L.head_pan is not None)
-        else s_pan
-    )
-    t_ear = clamp_pulse(L.ear, pose.ear) if pose.ear is not None else s_ear
-
-    move_arm = pose.arm_j0 is not None or pose.arm_j1 is not None
+    # Head / ear targets
     move_head = pose.head_tilt is not None or pose.head_pan is not None
-    move_ear = pose.ear is not None
+    move_ear  = pose.ear is not None
+    head_lp = orch._head_ctl.last_pulses if orch._head_ctl is not None else (None, None)
+    ear_lp  = orch._ear_ctl.last_pulse   if orch._ear_ctl  is not None else None
+
+    s_pan  = head_lp[0] if head_lp[0] is not None else (L.head_pan.center_us  if L.head_pan  is not None else 0.0)
+    s_tilt = head_lp[1] if head_lp[1] is not None else (L.head_tilt.center_us if L.head_tilt is not None else 0.0)
+    s_ear  = ear_lp     if ear_lp     is not None else (L.ear.center_us        if L.ear       is not None else 0.0)
+
+    t_tilt = clamp_pulse(L.head_tilt, pose.head_tilt) if (pose.head_tilt is not None and L.head_tilt is not None) else s_tilt
+    t_pan  = clamp_pulse(L.head_pan,  pose.head_pan)  if (pose.head_pan  is not None and L.head_pan  is not None) else s_pan
+    t_ear  = clamp_pulse(L.ear,       pose.ear)        if (pose.ear       is not None and L.ear       is not None) else s_ear
 
     duration_s = max(0.01, float(duration_s))
     steps = max(2, int(steps))
 
     for i in range(1, steps + 1):
         t = i / float(steps)
-        a = t * t * (3.0 - 2.0 * t)  # smoothstep: ease-in and ease-out
+        a = t * t * (3.0 - 2.0 * t)   # smoothstep: ease-in/out
+
         if move_arm:
-            orch.arm.set_pulses(
-                s_arm0 + (t_arm0 - s_arm0) * a,
-                s_arm1 + (t_arm1 - s_arm1) * a,
+            orch.arm.set_all(
+                cs_b  + (t_b  - cs_b)  * a,
+                cs_sh + (t_sh - cs_sh) * a,
+                cs_el + (t_el - cs_el) * a,
             )
-        if move_head:
-            orch.head.set_pulses(
-                s_pan + (t_pan - s_pan) * a,
+        if move_head and orch._head_ctl is not None:
+            orch._head_ctl.set_pulses(
+                s_pan  + (t_pan  - s_pan)  * a,
                 s_tilt + (t_tilt - s_tilt) * a,
             )
-        if move_ear:
-            orch.ear.set_pulse(s_ear + (t_ear - s_ear) * a)
+        if move_ear and orch._ear_ctl is not None:
+            orch._ear_ctl.set_pulse(s_ear + (t_ear - s_ear) * a)
+
         time.sleep(duration_s / steps)

@@ -22,57 +22,63 @@ from action_servos.config import (
 from action_servos.groups import ServoOrchestrator, normalized_to_us
 
 
-def _arm_us(orch: ServoOrchestrator, n0: float, n1: float) -> tuple[float, float]:
-    a = orch.arm
-    return (
-        normalized_to_us(a.joint0_spec, n0),
-        normalized_to_us(a.joint1_spec, n1),
-    )
+def _shoulder_us(orch: ServoOrchestrator, n: float) -> float:
+    return normalized_to_us(orch.layout.shoulder_a, n)
 
 
-def _head_tilt_us(orch: ServoOrchestrator, tilt_norm: float) -> tuple[float, float]:
-    h = orch.head
-    pan_us = h.pan_spec.center_us if h.pan_spec is not None else 0.0
-    return (pan_us, normalized_to_us(h.tilt_spec, tilt_norm))
-
-
-def _ear_us(orch: ServoOrchestrator, n: float) -> float:
-    return normalized_to_us(orch.ear.spec, n)
+def _elbow_us(orch: ServoOrchestrator, n: float) -> float:
+    return normalized_to_us(orch.layout.elbow, n)
 
 
 def run_sequence(orch: ServoOrchestrator, duration_s: float, steps: int) -> None:
     d, s = duration_s, steps
+    L = orch.layout
+
     print("Centering (fast).")
     orch.all_center()
 
     print("Arm: slow move (shoulder/elbow slightly negative).")
-    orch.arm.move_ramp(*_arm_us(orch, -0.2, -0.2), duration_s=d, steps=s)
+    orch.arm.move_ramp(
+        L.base.center_us,
+        _shoulder_us(orch, -0.2),
+        _elbow_us(orch, -0.2),
+        duration_s=d, steps=s,
+    )
 
     print("Arm: slow move (slight positive).")
-    orch.arm.move_ramp(*_arm_us(orch, 0.15, 0.12), duration_s=d, steps=s)
+    orch.arm.move_ramp(
+        L.base.center_us,
+        _shoulder_us(orch, 0.15),
+        _elbow_us(orch, 0.12),
+        duration_s=d, steps=s,
+    )
 
-    print("Head tilt: slow down, then up toward neutral.")
-    pu, t_down = _head_tilt_us(orch, 0.35)
-    orch.head.move_ramp(pu, t_down, duration_s=d, steps=s)
-    pu2, t_up = _head_tilt_us(orch, -0.25)
-    orch.head.move_ramp(pu2, t_up, duration_s=d, steps=s)
+    if orch._head_ctl is not None:
+        print("Head tilt: slow down, then up toward neutral.")
+        h = orch._head_ctl
+        pan_us = h.pan_spec.center_us if h.pan_spec is not None else 0.0
+        orch.head.move_ramp(pan_us, normalized_to_us(h.tilt_spec, 0.35), duration_s=d, steps=s)
+        orch.head.move_ramp(pan_us, normalized_to_us(h.tilt_spec, -0.25), duration_s=d, steps=s)
 
-    print("Ear: slow out and back.")
-    orch.ear.move_ramp(_ear_us(orch, 0.25), duration_s=d, steps=s)
-    orch.ear.move_ramp(orch.ear.spec.center_us, duration_s=d, steps=s)
+    if orch._ear_ctl is not None:
+        print("Ear: slow out and back.")
+        orch.ear.move_ramp(normalized_to_us(orch.ear.spec, 0.25), duration_s=d, steps=s)
+        orch.ear.move_ramp(orch.ear.spec.center_us, duration_s=d, steps=s)
 
     print("Arm: slow return to center.")
     orch.arm.move_ramp(
-        orch.arm.joint0_spec.center_us,
-        orch.arm.joint1_spec.center_us,
-        duration_s=d,
-        steps=s,
+        L.base.center_us,
+        L.shoulder_a.center_us,
+        L.elbow.center_us,
+        duration_s=d, steps=s,
     )
 
-    print("Head tilt: slow center.")
-    pc = orch.head.tilt_spec.center_us
-    pp = orch.head.pan_spec.center_us if orch.head.pan_spec is not None else 0.0
-    orch.head.move_ramp(pp, pc, duration_s=d, steps=s)
+    if orch._head_ctl is not None:
+        print("Head tilt: slow center.")
+        h = orch._head_ctl
+        pc = h.tilt_spec.center_us
+        pp = h.pan_spec.center_us if h.pan_spec is not None else 0.0
+        orch.head.move_ramp(pp, pc, duration_s=d, steps=s)
 
     print("Done (all joints near center).")
 

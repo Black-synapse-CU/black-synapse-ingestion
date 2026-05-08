@@ -50,7 +50,7 @@ void loop() {
     unsigned int pulse_us = 0;
     // sscanf parses "SET <ch> <pulse_us>"
     if (sscanf(line.c_str(), "SET %d %u", &ch, &pulse_us) == 2) {
-      if (ch >= 0 && ch <= 15 && pulse_us >= 400 && pulse_us <= 2600) {
+      if (ch >= 0 && ch <= 15 && pulse_us >= 400 && pulse_us <= 2700) {
         pwm.writeMicroseconds(ch, pulse_us);
         Serial.println("OK");
       } else {

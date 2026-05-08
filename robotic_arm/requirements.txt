@@ -1,3 +1,4 @@
-pyserial>=3.5
+adafruit-circuitpython-pca9685>=3.4
+adafruit-blinka>=8.0
 numpy>=2.0
 matplotlib>=3.9

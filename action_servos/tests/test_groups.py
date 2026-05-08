@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,20 +17,21 @@ from action_servos.groups import (
     presets_head_pose,
     us_to_normalized,
 )
-from action_servos.sequences import Keyframe, Pose, Sequence, _ramp_to_pose
+from action_servos.sequences import Pose, Sequence, _ramp_to_pose
 
 
 def _mock_pca() -> Any:
-    """Return a MagicMock that records set_channel_pulse_us and set_channel_full_off calls."""
     return MagicMock()
+
+
+def _layout() -> ServoLayout:
+    return ServoLayout.default_layout()
 
 
 def _arm(pca: Any | None = None) -> ArmController:
     if pca is None:
         pca = _mock_pca()
-    j0 = JointSpec(6, min_us=900.0, max_us=2100.0)
-    j1 = JointSpec(5, min_us=900.0, max_us=2100.0)
-    return ArmController(pca, j0, j1)
+    return ArmController(pca, _layout())
 
 
 def _ear(pca: Any | None = None) -> EarController:
@@ -39,9 +40,13 @@ def _ear(pca: Any | None = None) -> EarController:
     return EarController(pca, JointSpec(3))
 
 
+# ---------------------------------------------------------------------------
+# Pulse helpers
+# ---------------------------------------------------------------------------
+
 def test_clamp_pulse() -> None:
     s = JointSpec(0, min_us=1000.0, max_us=2000.0)
-    assert clamp_pulse(s, 500) == 1000.0
+    assert clamp_pulse(s, 500)  == 1000.0
     assert clamp_pulse(s, 2500) == 2000.0
     assert clamp_pulse(s, 1500) == 1500.0
 
@@ -49,14 +54,13 @@ def test_clamp_pulse() -> None:
 def test_normalized_round_trip() -> None:
     s = JointSpec(0, min_us=1000.0, max_us=2000.0)
     assert normalized_to_us(s, -1.0) == 1000.0
-    assert normalized_to_us(s, 1.0) == 2000.0
-    assert normalized_to_us(s, 0.0) == 1500.0
+    assert normalized_to_us(s, 1.0)  == 2000.0
+    assert normalized_to_us(s, 0.0)  == 1500.0
     assert us_to_normalized(s, 1250.0) == pytest.approx(-0.5, abs=1e-6)
 
 
 def test_us_to_normalized_none() -> None:
-    s = JointSpec(0)
-    assert us_to_normalized(s, None) == 0.0
+    assert us_to_normalized(JointSpec(0), None) == 0.0
 
 
 def test_joint_spec_channel_bounds() -> None:
@@ -66,49 +70,90 @@ def test_joint_spec_channel_bounds() -> None:
         JointSpec(0, min_us=2000, max_us=1000)
 
 
+# ---------------------------------------------------------------------------
+# ServoLayout
+# ---------------------------------------------------------------------------
+
+def test_servo_layout_default() -> None:
+    L = ServoLayout.default_layout()
+    assert L.base.channel       == 0
+    assert L.shoulder_a.channel   == 1
+    assert L.shoulder_a.min_us    == 1500.0
+    assert L.shoulder_a.max_us    == 2300.0
+    assert L.shoulder_a.center_us == 1900.0
+    assert L.shoulder_b.channel   == 3
+    assert L.wrist_tilt is not None
+    assert L.wrist_tilt.channel == 4
+    assert L.elbow.channel      == 7
+    assert L.head_pan  is not None
+    assert L.head_pan.channel   == 5
+    assert L.head_pan.min_us    == 1000.0
+    assert L.head_pan.max_us    == 2500.0
+    assert L.head_pan.center_us == 1700.0
+    assert L.head_tilt is not None
+    assert L.head_tilt.channel   == 6
+    assert L.head_tilt.min_us    == 1200.0
+    assert L.head_tilt.max_us    == 2500.0
+    assert L.head_tilt.center_us == 1700.0
+    assert L.ear is None
+
+
 def test_presets_head_pose() -> None:
     assert presets_head_pose("neutral") is not None
     assert presets_head_pose("unknown_pose_xyz") is None
 
 
-def test_servo_layout_default() -> None:
-    L = ServoLayout.default_layout()
-    assert L.arm_joint0.channel == 6
-    assert L.arm_joint1.channel == 5
-    assert L.head_pan is None
-    assert L.head_tilt.channel == 0
-    assert L.ear.channel == 3
+# ---------------------------------------------------------------------------
+# ArmController
+# ---------------------------------------------------------------------------
 
+def test_arm_set_all_writes_channels() -> None:
+    pca = _mock_pca()
+    arm = _arm(pca)
+    L = _layout()
+    arm.set_all(1500, 1500, 1500)
+    channels_written = {call.args[0] for call in pca.set_channel_pulse_us.call_args_list}
+    assert channels_written == {L.base.channel, L.shoulder_a.channel, L.shoulder_b.channel, L.elbow.channel}
 
-# --- release / resume tests ---
 
 def test_arm_release_calls_full_off() -> None:
     pca = _mock_pca()
     arm = _arm(pca)
+    L = _layout()
     arm.release()
     assert arm._released is True
-    pca.set_channel_full_off.assert_any_call(6)
-    pca.set_channel_full_off.assert_any_call(5)
-    assert pca.set_channel_full_off.call_count == 2
+    channels_off = {call.args[0] for call in pca.set_channel_full_off.call_args_list}
+    expected = {L.base.channel, L.shoulder_a.channel, L.shoulder_b.channel, L.elbow.channel, L.wrist_tilt.channel}
+    assert channels_off == expected
 
 
-def test_arm_resume_restores_last_pulse() -> None:
+def test_arm_resume_restores_last_state() -> None:
     pca = _mock_pca()
     arm = _arm(pca)
-    arm.set_pulses(1800.0, 1200.0)
+    arm.set_all(1600, 1700, 1400)
     arm.release()
     arm.resume()
     assert arm._released is False
-    assert arm.last_pulses == (1800.0, 1200.0)
+    s = arm.last_state
+    assert s.base     == pytest.approx(1600.0)
+    assert s.shoulder == pytest.approx(1700.0)
+    assert s.elbow    == pytest.approx(1400.0)
 
 
-def test_arm_resume_defaults_to_center() -> None:
+def test_arm_resume_defaults_to_centre() -> None:
     pca = _mock_pca()
     arm = _arm(pca)
-    # No set_pulses called yet — state is None
-    arm.resume()
-    assert arm.last_pulses == (arm.joint0_spec.center_us, arm.joint1_spec.center_us)
+    L = _layout()
+    arm.resume()   # no prior set_all — should use centre_us
+    s = arm.last_state
+    assert s.base     == pytest.approx(L.base.center_us)
+    assert s.shoulder == pytest.approx(L.shoulder_a.center_us)
+    assert s.elbow    == pytest.approx(L.elbow.center_us)
 
+
+# ---------------------------------------------------------------------------
+# EarController
+# ---------------------------------------------------------------------------
 
 def test_ear_release_and_resume() -> None:
     pca = _mock_pca()
@@ -122,61 +167,62 @@ def test_ear_release_and_resume() -> None:
     assert ear.last_pulse == 1700.0
 
 
-def test_ear_resume_defaults_to_center() -> None:
+def test_ear_resume_defaults_to_centre() -> None:
     pca = _mock_pca()
     ear = _ear(pca)
     ear.resume()
     assert ear.last_pulse == ear.spec.center_us
 
 
-# --- Pose / Sequence tests ---
+# ---------------------------------------------------------------------------
+# Pose / Sequence
+# ---------------------------------------------------------------------------
 
-def test_pose_from_normalized_arm() -> None:
-    from action_servos.groups import ServoOrchestrator
-    orch = ServoOrchestrator()
-    # Patch layout directly without opening hardware
-    L = ServoLayout.default_layout()
-    orch.layout = L
-    pose = Pose.from_normalized(orch, arm=(0.0, 0.0))
-    assert pose.arm_j0 == pytest.approx(1500.0)
-    assert pose.arm_j1 == pytest.approx(1500.0)
-    assert pose.ear is None
+def test_pose_from_normalized() -> None:
+    orch = MagicMock()
+    orch.layout = _layout()
+    pose = Pose.from_normalized(orch, shoulder=0.0, elbow=0.0)
+    assert pose.shoulder == pytest.approx(1900.0)  # center_us of shoulder_a
+    assert pose.elbow    == pytest.approx(1500.0)
+    assert pose.base is None
 
 
 def test_sequence_play_visits_poses_in_order() -> None:
-    """Verify that play() ramps to each keyframe in order using a mock orchestrator."""
-    from action_servos.groups import ServoOrchestrator
-
-    visited: list[tuple[float, float]] = []
+    """Verify play() ramps to each keyframe in order."""
+    visited: list[tuple] = []
 
     pca = _mock_pca()
     arm = _arm(pca)
 
-    # Intercept set_pulses to record targets reached at end of each ramp
-    original_set_pulses = arm.set_pulses
+    original_set_all = arm.set_all
 
-    def recording_set_pulses(j0: float, j1: float) -> None:
-        original_set_pulses(j0, j1)
-        visited.append((j0, j1))
+    def recording_set_all(*args: float) -> None:
+        original_set_all(*args)
+        visited.append(args)
 
-    arm.set_pulses = recording_set_pulses  # type: ignore[method-assign]
+    arm.set_all = recording_set_all  # type: ignore[method-assign]
 
-    orch = MagicMock(spec=ServoOrchestrator)
-    orch.layout = ServoLayout.default_layout()
+    orch = MagicMock()
+    orch.layout = _layout()
     orch.arm = arm
-    orch.head.last_pulses = (None, None)
-    orch.ear.last_pulse = None
+    orch._head_ctl = None
+    orch._ear_ctl  = None
+
+    target1 = (1500, 1800, 1200)
+    target2 = (1500, 1500, 1500)
 
     seq = (
         Sequence()
-        .add(Pose(arm_j0=1800.0, arm_j1=1200.0), duration_s=0.01, steps=2)
-        .add(Pose(arm_j0=1500.0, arm_j1=1500.0), duration_s=0.01, steps=2)
+        .add(Pose(shoulder=float(target1[1]), elbow=float(target1[2])),
+             duration_s=0.01, steps=2)
+        .add(Pose(shoulder=float(target2[1]), elbow=float(target2[2])),
+             duration_s=0.01, steps=2)
     )
     seq.play(orch)
 
-    # Last visited value of each ramp should equal the keyframe target
-    # (visited contains all intermediate + final steps; last two are final steps of each ramp)
-    assert visited[-1] == pytest.approx((1500.0, 1500.0), abs=1.0)
-    # The first ramp's final step should be close to (1800, 1200)
-    # It's visited[1] (index 1 out of 0,1 for first ramp's 2 steps)
-    assert visited[1] == pytest.approx((1800.0, 1200.0), abs=1.0)
+    # The last visited tuple should be close to target2
+    assert visited[-1][1] == pytest.approx(1500.0, abs=1.0)
+    assert visited[-1][2] == pytest.approx(1500.0, abs=1.0)
+    # First ramp's final step should be close to target1
+    assert visited[1][1] == pytest.approx(1800.0, abs=1.0)
+    assert visited[1][2] == pytest.approx(1200.0, abs=1.0)

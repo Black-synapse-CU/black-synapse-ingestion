@@ -1,6 +1,28 @@
 # Robotic Arm Module
 
-Python control layer for a 6-DOF serial arm driven by an Arduino + PCA9685 servo driver. Includes forward kinematics, inverse kinematics, and an interactive visualizer.
+Python control layer for a 6-DOF arm driven by a Jetson + PCA9685 servo driver over I2C. Includes LLM tool API (wave, inspect, dance, IK pick-and-place), servo calibration, an interactive pulse visualizer, and a computer vision subsystem (ArUco + YOLO).
+
+---
+
+## Directory Structure
+
+```
+robotic_arm/
+├── config.py                        # JointSpec + ArmLayout dataclasses
+├── i2c_bridge.py                    # Direct I2C comms to PCA9685 (I2CBridge)
+├── controller.py                    # Named-joint interface + smooth ramps
+├── tools.py                         # LLM tool API (wave, dance, IK pick-and-place, VLM inspection)
+├── visualizer.py                    # Tkinter raw-pulse slider GUI
+├── calibrate.py                     # Interactive servo calibration REPL
+├── requirements.txt
+├── computer_vision/
+│   ├── aruco_detection.py           # ArUco marker detection (camera or image)
+│   ├── aruco_generator.py           # ArUco marker image generator
+│   └── workspace_detector.py        # YOLO instance-segmentation detector
+└── arduino/                         # Legacy — not used with Jetson+I2C setup
+    └── servo_bridge/
+        └── servo_bridge.ino
+```
 
 ---
 
@@ -10,77 +32,60 @@ Python control layer for a 6-DOF serial arm driven by an Arduino + PCA9685 servo
 pip install -r robotic_arm/requirements.txt
 ```
 
-Run the visualizer from the repo root:
-
-```bash
-python -m robotic_arm.visualizer                   # simulation only
-python -m robotic_arm.visualizer --port COM3        # + drive real hardware
-python -m robotic_arm.visualizer --port /dev/ttyUSB0
-```
-
 ---
 
 ## Hardware
 
 | Component | Details |
 |-----------|---------|
-| Microcontroller | Arduino (any model with USB serial) |
-| Servo driver | PCA9685 16-channel PWM board (I2C) |
-| Servos | Standard hobby servos, 500–2500 µs pulse range |
-| Connection | USB serial, 115200 baud |
+| Host | Jetson (Nano / Orin / Xavier — any with I2C GPIO) |
+| Servo driver | PCA9685 16-channel PWM board, I2C address 0x40 |
+| Servos | Standard hobby servos, 400–2700 µs pulse range |
+| Connection | I2C (SDA/SCL on the Jetson 40-pin header) |
+| Cameras | 0 = main, 1 = workspace (overhead), 2 = arm-mounted |
 
-The Arduino must implement the serial protocol described below and send `READY` after `setup()` completes.
+The Jetson talks directly to the PCA9685 over I2C — no Arduino required. Wire SDA → pin 3, SCL → pin 5, GND, and 3.3 V (or 5 V for the PCA9685 VCC; servo power is separate).
 
 ---
 
 ## Channel Map
 
+> `tools.py` uses the `action_servos` module (not `robotic_arm/config.py`) for servo control. The table below documents the `robotic_arm` config layout, used by `i2c_bridge.py`, `controller.py`, `visualizer.py`, and `calibrate.py`.
+
 | Channel | Joint | Range |
 |---------|-------|-------|
-| 0 | Base | 0° – 180° |
-| 1 | Shoulder 1 | (limits TBD) |
-| 2 | Wrist tilt | (limits TBD) |
-| 3 | Shoulder 2 | 0° – 130° |
-| 4 | Wrist rotate | (limits TBD) |
-| 5 | Elbow | 130° – 180° |
+| 0 | base | 0° – 180° (center_deg=9°) |
+| 1 | shoulder1 | 500–2500 µs |
+| 2 | wrist_tilt | 500–2500 µs |
+| 3 | shoulder2 | 900–1900 µs (center=1400 µs) |
+| 4 | wrist_rotate | 500–2500 µs |
+| 5 | elbow | 130° – 180° (center=180°) |
 
-Limits are enforced in `config.py` via `JointSpec.from_degrees()` and clamped on every command before it reaches the Arduino.
-
----
-
-## Serial Protocol
-
-All messages are newline-terminated ASCII.
-
-| Direction | Command | Description |
-|-----------|---------|-------------|
-| Python → Arduino | `SET <ch> <pulse_us>` | Move channel `ch` to `pulse_us` microseconds |
-| Python → Arduino | `CENTER` | Move all 16 channels to 1500 µs |
-| Python → Arduino | `PING` | Health check |
-| Arduino → Python | `OK` | Command succeeded |
-| Arduino → Python | `ERR <message>` | Command failed |
-| Arduino → Python | `PONG` | Response to PING |
-| Arduino → Python | `READY` | Sent once after `setup()` on power-up / reset |
+Limits are enforced in `config.py` via `JointSpec` and clamped before reaching the servo driver.
 
 ---
 
-## File Reference
+## i2c_bridge.py
 
+Direct I2C bridge to the PCA9685. No Arduino required.
+
+```python
+from robotic_arm.i2c_bridge import I2CBridge
+
+with I2CBridge(address=0x40) as bridge:
+    bridge.ping()               # True if PCA9685 responds
+    bridge.set_channel(0, 1500) # move channel 0 to 1500 µs
+    bridge.center_all()         # all 16 channels → 1500 µs
 ```
-robotic_arm/
-├── config.py        # Joint specs, channel map, degree ↔ µs conversion
-├── serial_bridge.py # Low-level serial comms to Arduino
-├── controller.py    # High-level arm control (named joints, smooth ramps)
-├── tools.py         # LLM tool API (pick, place, stack, clean_table)
-├── visualizer.py    # Interactive FK/IK GUI
-└── requirements.txt
-```
+
+Pulse widths are converted to 16-bit PCA9685 duty cycles internally:
+`duty = round(pulse_us / 20000 * 65535)`
 
 ---
 
 ## config.py
 
-Defines two dataclasses.
+Defines two dataclasses used by `i2c_bridge`, `controller`, `visualizer`, and `calibrate`.
 
 **`JointSpec`** — one servo's hardware spec:
 
@@ -92,64 +97,48 @@ Defines two dataclasses.
 | `center_us` | float | Center/rest pulse width in µs |
 | `name` | str | Human-readable joint name |
 
-Useful methods:
-
 ```python
-spec = JointSpec.from_degrees(channel=5, min_deg=130, max_deg=180, name="elbow")
+spec = JointSpec.from_degrees(channel=5, min_deg=130, max_deg=180, center_deg=180, name="elbow")
 
-spec.clamp(pulse_us)            # clamp raw µs to [min_us, max_us]
-spec.to_us(normalized)          # map normalized [-1, 1] → [min_us, max_us]
-spec.to_normalized(pulse_us)    # inverse of to_us
+spec.clamp(pulse_us)         # clamp raw µs to [min_us, max_us]
+spec.to_us(normalized)       # map normalized [-1, 1] → [min_us, max_us]
+spec.to_normalized(pulse_us) # inverse of to_us
 ```
 
-**`ArmLayout`** — the full joint map. Instantiate with defaults or override individual joints:
+**`ArmLayout`** — the full joint map:
 
 ```python
-from robotic_arm.config import ArmLayout, JointSpec
+from robotic_arm.config import ArmLayout
 
-layout = ArmLayout()            # default channel map + limits
-layout.elbow                    # JointSpec for channel 5
-layout.all_joints               # dict of name → JointSpec
-layout.by_channel(3)            # look up JointSpec by channel number
+layout = ArmLayout()           # default channel map + limits
+layout.elbow                   # JointSpec for channel 5
+layout.all_joints              # dict of name → JointSpec
+layout.by_channel(3)           # look up JointSpec by channel number
 ```
-
----
-
-## serial_bridge.py
-
-Handles the raw serial connection. Use as a context manager:
-
-```python
-from robotic_arm.serial_bridge import SerialBridge
-
-with SerialBridge("/dev/ttyUSB0", baud=115200) as bridge:
-    bridge.ping()                        # True if Arduino responds
-    bridge.set_channel(0, 1500)          # move channel 0 to 1500 µs
-    bridge.center_all()                  # broadcast CENTER command
-```
-
-`SerialBridge.open()` blocks until the Arduino sends its `READY` banner (up to 5 s).
 
 ---
 
 ## controller.py
 
-Named-joint interface on top of `SerialBridge`.
+Named-joint interface on top of any `ArmBridge` (I2CBridge, or any object with `set_channel` / `center_all` / `ping`).
 
 ```python
 from robotic_arm.config import ArmLayout
-from robotic_arm.serial_bridge import SerialBridge
+from robotic_arm.i2c_bridge import I2CBridge
 from robotic_arm.controller import RoboticArmController
 
-with SerialBridge("COM3") as bridge:
+with I2CBridge() as bridge:
     arm = RoboticArmController(bridge, layout=ArmLayout())
 
-    arm.set_joint("base", 0.0)           # normalized: 0.0 = center (90°)
-    arm.set_joint("shoulder2", -1.0)     # normalized: -1.0 = min (0°)
-    arm.set_joint_us("elbow", 2200)      # raw µs
+    arm.set_joint("base", 0.0)         # normalized: 0.0 = center
+    arm.set_joint("shoulder2", -1.0)   # normalized: -1.0 = min_us
+    arm.set_joint_us("elbow", 2200)    # raw µs
 
-    arm.center()                         # all joints to center_us
-    arm.center_all_channels()            # broadcast CENTER (all 16 ch to 1500 µs)
+    arm.center()                        # all joints to their center_us
+    arm.center_all_channels()           # all 16 channels → 1500 µs
+
+    arm.get_joint_us("base")            # last sent µs, or None
+    arm.get_joint_normalized("base")    # last sent normalized, or None
 
     # Smooth multi-joint motion (smoothstep interpolation)
     arm.move_ramp(
@@ -160,91 +149,277 @@ with SerialBridge("COM3") as bridge:
     )
 ```
 
-`move_ramp` interpolates all listed joints simultaneously using a smoothstep curve — no abrupt starts or stops.
+`move_ramp` interpolates all listed joints simultaneously using a smoothstep curve (`t² (3 − 2t)`).
 
 ---
 
 ## tools.py
 
-High-level LLM tool API. The perception system calls `update_env()` to push object positions; the LLM planner calls the action functions.
+LLM tool API for the robotic arm. Uses `action_servos.ServoOrchestrator` + `Sequence`/`Pose`/`Keyframe` for servo control and OpenAI GPT-4o for vision tasks.
+
+### Camera indices
+
+| Index | Role |
+|-------|------|
+| 0 | Main camera |
+| 1 | Workspace (overhead) — used by `look_at_workspace`, `get_objects`, `calibrate_homography`, `ik_pick_and_place` |
+| 2 | Arm-mounted — used by `inspect_object` |
+
+Override via env vars: `CAMERA_WORKSPACE`, `CAMERA_ARM`, `CAMERA_MAIN`.
+
+---
+
+### wave_hello
 
 ```python
-from robotic_arm.tools import update_env, get_objects, pick, place, pick_and_place, clean_table, stack
+from robotic_arm.tools import wave_hello
 
-# Feed in a fresh camera snapshot (ArUco marker positions, world-frame 0–1)
-update_env([
-    {"id": 10, "x": 0.2, "y": 0.5},
-    {"id": 11, "x": 0.7, "y": 0.3},
-])
-
-get_objects()                              # returns current object list
-pick(arm, object_id=10)                   # pick object 10
-place(arm, object_id=10, target="bin")    # place at a named drop zone
-pick_and_place(arm, 11, "zone_a")         # pick + place in one call
-clean_table(arm)                          # move all visible objects to bin
-stack(arm, [10, 11], stack_zone="zone_a") # stack objects at a zone
+wave_hello(orch)   # raises arm, waves out/in × 2, returns neutral (~11 s)
 ```
 
-Built-in drop zones: `bin` (x=0.9), `zone_a` (x=0.2), `zone_b` (x=0.5). Pass a custom `drop_zones` dict to override.
+Delegates to `execute_action(orch, "wave", None)` from `worker/app/arm_actions.py`.
 
-> **Note:** The motion primitives use placeholder joint angles. Calibrate the `move_ramp` targets in `pick()` and `place()` against your actual arm geometry and link lengths before use.
+---
+
+### look_at_workspace
+
+```python
+from robotic_arm.tools import look_at_workspace
+
+description = look_at_workspace(openai_client)
+description = look_at_workspace(openai_client, prompt="Focus on any red objects.")
+```
+
+Captures one frame from camera 1 (workspace), sends it to GPT-4o Vision with a default workspace description prompt (optionally extended by `prompt`). Returns the VLM's description string.
+
+---
+
+### inspect_object
+
+```python
+from robotic_arm.tools import inspect_object
+
+# Arm already positioned — capture immediately
+result = inspect_object(orch, openai_client, object_id=4)
+
+# Move arm to inspection pose first, then capture
+result = inspect_object(orch, openai_client, object_id=5, move_to_workspace=True)
+```
+
+Captures from camera 2 (arm-mounted). When `move_to_workspace=True`, moves the arm to a forward-facing pose (shoulder=0.3, elbow=0.5, wrist_pitch=-0.2) before capturing. Returns GPT-4o description.
+
+---
+
+### dance
+
+```python
+from robotic_arm.tools import dance
+
+dance(orch)   # 7-keyframe expressive sequence (~10 s), returns "Danced."
+```
+
+Sweeps, wrist spins, reach-up, and neutral return. Tune normalized pose values in `tools.py` on hardware.
+
+---
+
+### get_objects
+
+```python
+from robotic_arm.tools import get_objects
+
+objects = get_objects()            # workspace camera (default)
+objects = get_objects(camera_index=1)
+
+# Returns: {marker_id: (cx_pixel, cy_pixel)}
+# e.g. {4: (320, 240), 5: (180, 310)}
+```
+
+Captures one frame, runs ArUco detection (DICT_4X4_50), and returns pixel centroids for **object markers only** (IDs 4–6: cube_1, cube_2, bin_1). Reference markers (IDs 0–3) are excluded.
+
+---
+
+### calibrate_homography
+
+```python
+from robotic_arm.tools import calibrate_homography
+
+H = calibrate_homography()
+
+# With custom physical measurements (required for accuracy):
+H = calibrate_homography(
+    marker_world_coords={
+        0: (0.0,  0.0),    # loc_0 position in cm from robot base
+        1: (25.0, 0.0),    # loc_1
+        2: (0.0,  20.0),   # loc_2
+        3: (25.0, 20.0),   # loc_3
+    }
+)
+```
+
+Detects the 4 reference ArUco markers (IDs 0–3, loc_0–loc_3) from the workspace camera and computes a homography matrix H via `cv2.getPerspectiveTransform`. H is cached in `_H_CACHE` for use by `ik_pick_and_place`.
+
+> **Required before IK:** Print markers 0–3 (`aruco_generator.py`), place them at known positions on the workspace mat, measure each position from the robot base in cm, then pass those measurements as `marker_world_coords`.
+
+---
+
+### ik_pick_and_place
+
+Full IK pipeline (~18–20 seconds):
+
+```python
+from robotic_arm.tools import ik_pick_and_place
+
+# calibrate_homography() must have been called first (or pass H explicitly)
+result = ik_pick_and_place(orch, object_id=4, target="bin")
+result = ik_pick_and_place(orch, object_id=5, target="zone_a", H=my_H)
+
+# Returns:
+# {"success": True,  "object_id": 4, "placed_at": "bin"}
+# {"success": False, "error": "..."} on failure
+```
+
+| Step | Action |
+|------|--------|
+| 1 | `get_objects()` — detect object pixel position via ArUco |
+| 2 | Apply homography H → world coordinates (cm from robot base) |
+| 3 | Solve IK (`_solve_ik`) — law of cosines for base, shoulder, elbow |
+| 4 | Open gripper |
+| 5 | Move to approach pose (above object) |
+| 6 | Lower to grasp height |
+| 7 | Close gripper |
+| 8 | Lift |
+| 9 | Solve IK for drop target |
+| 10 | Move above target |
+| 11 | Lower to place height |
+| 12 | Release gripper |
+| 13 | Return to neutral |
+
+**Built-in drop targets** (world-frame cm, update in `tools.py`):
+
+| Target | x cm | y cm |
+|--------|------|------|
+| `bin` | 20.0 | 5.0 |
+| `zone_a` | 10.0 | 10.0 |
+| `zone_b` | 15.0 | 10.0 |
+
+#### IK calibration (required)
+
+Set these env vars from physical calibration data (`robotic_arm/calibrate.py`):
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `L1_CM` | 15.0 | Upper-arm link length (shoulder → elbow, cm) |
+| `L2_CM` | 12.0 | Forearm link length (elbow → wrist, cm) |
+| `BASE_DEG_RANGE` | 180.0 | Total degree sweep of base joint |
+| `SHOULDER_DEG_RANGE` | 180.0 | Total degree sweep of shoulder |
+| `ELBOW_DEG_RANGE` | 180.0 | Total degree sweep of elbow |
+| `BASE_ZERO_OFFSET_N` | 0.0 | Normalized offset at 0° for base |
+| `SHOULDER_ZERO_OFFSET_N` | 0.0 | Normalized offset at 0° for shoulder |
+| `ELBOW_ZERO_OFFSET_N` | 0.0 | Normalized offset at 0° for elbow |
+
+Motion height constants (normalized, tune per arm):
+
+| Constant | Default | Meaning |
+|----------|---------|---------|
+| `APPROACH_HEIGHT_N` | 0.4 | Shoulder height hovering above object |
+| `GRASP_HEIGHT_N` | -0.2 | Shoulder lowered to table |
+| `LIFT_HEIGHT_N` | 0.5 | Shoulder after grasping |
 
 ---
 
 ## visualizer.py
 
-Interactive GUI for testing FK and IK without needing hardware.
+Tkinter GUI for directly controlling raw pulse widths per channel. Useful for testing servo ranges without writing code.
 
-**Forward Kinematics panel**
+```bash
+python -m robotic_arm.visualizer                                   # simulation only
+python -m robotic_arm.visualizer --hardware                        # drive real servos via I2C
+python -m robotic_arm.visualizer --hardware --i2c-address 0x41    # non-default address
+```
 
-Move the three sliders to pose the arm. The 3-D view updates in real time.
-
-| Slider | Range |
-|--------|-------|
-| Base | 0° – 180° |
-| Shoulder | 0° – 130° |
-| Elbow | 130° – 180° |
-
-**Inverse Kinematics panel**
-
-Enter a target position (X, Y, Z in cm) and press **Solve IK**. The solver finds joint angles that reach that point and snaps the sliders to the solution. A yellow × marks the target in the 3-D view; a dashed line appears if the target is unreachable.
-
-**Arm Geometry fields**
-
-Set L1 (shoulder → elbow) and L2 (elbow → tip) in cm to match your physical arm. Press Enter to recompute.
-
-**Hardware mode**
-
-When `--port` is supplied, every slider move and every IK solve immediately writes pulse widths to channels 0, 3, and 5 over serial.
+Sliders show channels 0–5 (Base, Shoulder 1, Wrist Tilt, Shoulder 2, Wrist Rotate, Elbow) with range 400–2700 µs. Each slider move immediately sends the pulse to the PCA9685 when `--hardware` is supplied. **Reset to Start** returns all sliders to their startup defaults.
 
 ---
 
-## Kinematics Reference
+## calibrate.py
 
-### Forward Kinematics
+Interactive REPL for mapping pulse widths to real angles on the physical arm. Output is used to set the IK calibration env vars. Saves data to `robotic_arm/calibration.json`.
 
-```
-shoulder_angle s  — elevation above horizontal (0° = arm horizontal)
-elbow_angle e     — interior angle at elbow (180° = fully extended)
-
-upper_arm_angle   = s
-forearm_angle     = s + e − 180°
-
-elbow_pos = shoulder + L1 · [cos(s)·cos(b), cos(s)·sin(b), sin(s)]
-tip_pos   = elbow   + L2 · [cos(f)·cos(b), cos(f)·sin(b), sin(f)]
+```bash
+python -m robotic_arm.calibrate                      # default I2C address 0x40
+python -m robotic_arm.calibrate --i2c-address 0x41
 ```
 
-where `b` is the base angle and `f` is the forearm angle.
+| Command | Description |
+|---------|-------------|
+| `<ch> <pulse>` | Send pulse (µs) to channel (e.g. `3 1500`) |
+| `center` | All 16 channels → 1500 µs |
+| `log <ch> <pulse> <angle>` | Record a (pulse, angle) calibration point |
+| `show` | Print all recorded calibration points |
+| `save` | Write points to `robotic_arm/calibration.json` |
+| `quit` / `q` | Exit |
 
-### Inverse Kinematics
+Pulse range accepted: 400–2700 µs.
 
+---
+
+## computer_vision/
+
+### aruco_detection.py
+
+Detects ArUco markers from a live camera or static image. Requires `opencv-contrib-python`.
+
+**Known markers:**
+
+| ID | Name | Role |
+|----|------|------|
+| 0 | loc_0 | Homography reference |
+| 1 | loc_1 | Homography reference |
+| 2 | loc_2 | Homography reference |
+| 3 | loc_3 | Homography reference |
+| 4 | cube_1 | Pick target |
+| 5 | cube_2 | Pick target |
+| 6 | bin_1 | Pick target |
+
+```bash
+python robotic_arm/computer_vision/aruco_detection.py --mode camera
+python robotic_arm/computer_vision/aruco_detection.py --mode camera --dictionary DICT_4X4_50
+python robotic_arm/computer_vision/aruco_detection.py --mode image --image snap.jpg
 ```
-base_deg     = atan2(y, x)
-r            = sqrt(x² + y²)          horizontal reach
-d            = sqrt(r² + z²)          straight-line distance to target
 
-elbow_deg    = acos((L1² + L2² − d²) / (2·L1·L2))    law of cosines
-shoulder_deg = atan2(z, r) + acos((L1² + d² − L2²) / (2·L1·d))
+Returns `{marker_id: (cx_pixel, cy_pixel)}` from `draw_markers()`.
+
+### aruco_generator.py
+
+Generates ArUco marker images (DICT_4X4_50, 600 px) for printing. Creates IDs 0–3 (location/reference) and 4–6 (object markers). Output: `aruco_markers/marker_{name}_id{id}.png`.
+
+### workspace_detector.py
+
+YOLO instance-segmentation detector for workspace objects. Reports class, confidence, bounding box, and centroid per object.
+
+```bash
+python robotic_arm/computer_vision/workspace_detector.py --mode camera
+python robotic_arm/computer_vision/workspace_detector.py --mode camera --model yolov8s-seg.pt
+python robotic_arm/computer_vision/workspace_detector.py --mode camera --classes cup bottle
+python robotic_arm/computer_vision/workspace_detector.py --mode camera --conf 0.4 --json
+python robotic_arm/computer_vision/workspace_detector.py --mode image --image snap.jpg
 ```
 
-Returns `None` if `d > L1 + L2` (out of reach) or if the solution violates any joint limit.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--model` | `yolov8n-seg.pt` | YOLO segmentation weights (auto-downloaded) |
+| `--classes` | all | Filter to specific class names |
+| `--conf` | 0.35 | Minimum detection confidence |
+| `--json` | off | Print detections as JSON each frame |
+| `--camera-index` | 0 | OpenCV camera index |
+
+Detection output per object:
+```json
+{"class": "cup", "confidence": 0.87, "bbox": [x1, y1, x2, y2], "centroid": [cx, cy]}
+```
+
+---
+
+## arduino/ (legacy)
+
+`arduino/servo_bridge/servo_bridge.ino` is kept for reference but is no longer used. The Jetson talks to the PCA9685 directly over I2C via `i2c_bridge.py`.
