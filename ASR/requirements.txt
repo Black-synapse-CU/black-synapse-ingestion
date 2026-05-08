@@ -1,10 +1,11 @@
-pvporcupine 
 sounddevice
 soundfile
-webrtcvad 
+webrtcvad
 numpy<2
-python-dotenv
-fastapi
-uvicorn
-httpx
 openwakeword
+faster-whisper
+fastapi
+uvicorn[standard]
+websockets
+httpx
+python-dotenv

@@ -9,7 +9,7 @@ import os
 import asyncio
 from typing import List, Dict, Any
 import tiktoken
-import openai
+import httpx
 import numpy as np
 
 def setup_logging():
@@ -93,37 +93,25 @@ def chunk_text(text: str, tokenizer: tiktoken.Encoding,
     
     return chunks
 
-async def get_embedding(texts: List[str], openai_client: openai.OpenAI, 
-                       model: str = "text-embedding-3-small") -> List[List[float]]:
-    """
-    Generate embeddings for a list of texts using OpenAI's embedding API.
-    
-    Args:
-        texts: List of texts to embed
-        openai_client: OpenAI client instance
-        model: Embedding model to use
-        
-    Returns:
-        List of embedding vectors
-    """
+async def get_embedding(
+    texts: List[str],
+    ollama_url: str = "http://localhost:11434",
+    model: str = "nomic-embed-text",
+) -> List[List[float]]:
+    """Generate embeddings via Ollama's local embedding model."""
     if not texts:
         return []
-    
+
     try:
-        # OpenAI API supports batching, so we can process all texts at once
-        response = await asyncio.to_thread(
-            openai_client.embeddings.create,
-            model=model,
-            input=texts
-        )
-        
-        # Extract embeddings from response
-        embeddings = [data.embedding for data in response.data]
-        
-        return embeddings
-        
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                f"{ollama_url}/api/embed",
+                json={"model": model, "input": texts},
+            )
+            resp.raise_for_status()
+            return resp.json()["embeddings"]
     except Exception as e:
-        logging.error(f"Failed to generate embeddings: {e}")
+        logging.error("Failed to generate embeddings via Ollama: %s", e)
         raise
 
 def validate_document_payload(payload: Dict[str, Any]) -> List[str]:

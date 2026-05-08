@@ -13,6 +13,9 @@ from __future__ import annotations
 import logging
 import os
 import platform
+
+from dotenv import load_dotenv
+load_dotenv()
 import threading
 import time
 import uuid
@@ -24,6 +27,8 @@ import soundfile as sf
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
 SUPPORTED_SUFFIXES = {".wav", ".mp3"}
 SUPPORTED_MIME_TYPES = {
     "audio/wav": ".wav",
@@ -32,7 +37,8 @@ SUPPORTED_MIME_TYPES = {
     "audio/mp3": ".mp3",
 }
 RECEIVED_DIR = Path(os.environ.get("RECEIVED_AUDIO_DIR", "received_audio"))
-AUDIO_DEVICE: Optional[str] = os.environ.get("AUDIO_DEVICE") or None
+_audio_device_env = os.environ.get("AUDIO_DEVICE") or None
+AUDIO_DEVICE = int(_audio_device_env) if (_audio_device_env and _audio_device_env.isdigit()) else _audio_device_env
 
 app = FastAPI(title="Kokoro Speaker API", version="3.0.0")
 
@@ -226,6 +232,31 @@ async def play_audio(
 
     background_tasks.add_task(_background_play, stored_path, play_id)
     return JSONResponse({"status": "playing", "epoch": epoch, "play_id": play_id})
+
+
+@app.post("/play-now")
+async def play_now(
+    background_tasks: BackgroundTasks,
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+):
+    """
+    Plays audio immediately with no epoch check. Stops any current playback first.
+    Use for one-off sounds (chimes, alerts) that don't need barge-in protection.
+    """
+    if file is not None:
+        stored_path = await _store_upload(file)
+    else:
+        stored_path = await _store_stream(request)
+
+    _stop_now()
+    with _state_lock:
+        global _current_play_id
+        play_id = uuid.uuid4().hex
+        _current_play_id = play_id
+
+    background_tasks.add_task(_background_play, stored_path, play_id)
+    return JSONResponse({"status": "playing", "play_id": play_id})
 
 
 if __name__ == "__main__":

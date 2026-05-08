@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: lynx-auth-server
     restart: unless-stopped
-    env_file: ./server/.env
+    env_file: ../.env
     environment:
       # Override these here if you want to avoid editing .env
       PORT: 4000

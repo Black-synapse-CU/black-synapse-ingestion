@@ -1,0 +1,14 @@
+{
+  "faces": [
+    {
+      "name": "user_13",
+      "emotion": "fear",
+      "age": 31,
+      "gender": "M",
+      "confidence": 0.8522368118902186
+    }
+  ],
+  "scene_caption": "The scene shows an upside-down room corner with visible objects including three chairs turned upside down. One chair has a plastic cover on the seat. There is a small table or desk with the corner visible on the left side. Some electronic devices or cables are hanging on the wall or lying on the floor near the chairs. No person or any item the person might be holding is visible in the image.",
+  "location": null,
+  "updated_at": 1778203846.8450334
+}

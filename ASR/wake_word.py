@@ -6,30 +6,69 @@ import webrtcvad
 import sounddevice as sd
 import soundfile as sf
 import numpy as np
-import wave
+import asyncio
+import json
 import time
 import os
 import random
 import urllib.request
+import websockets
 from pathlib import Path
 from openwakeword import Model
 import openwakeword
+from dotenv import load_dotenv
+
+load_dotenv()
 
 WAKE_SOUNDS_DIR = Path(__file__).parent / "wake_sounds"
 
-SPEAKER_API_URL = os.getenv("SPEAKER_API_URL", "http://localhost:8001")
+SPEAKER_API_URL  = os.getenv("SPEAKER_API_URL",  "http://localhost:8001")
+ASR_WS_URL       = os.getenv("ASR_WS_URL",       "ws://localhost:8002/stream")
+FACE_SERVICE_URL = os.getenv("FACE_SERVICE_URL", "http://localhost:8003")
 
-def _interrupt_speaker():
-    """Fire-and-forget interrupt to the speaker API."""
+def _set_face_state(state: str, text: str = "") -> None:
+    """Fire-and-forget POST to the face service. Non-critical — silently ignored if offline."""
+    try:
+        body = json.dumps({"state": state, "text": text}).encode()
+        req = urllib.request.Request(
+            f"{FACE_SERVICE_URL}/face/state",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=1.0).close()
+    except Exception:
+        pass
+
+
+def _interrupt_speaker() -> int:
+    """Interrupt the speaker API and return the current epoch value."""
     try:
         req = urllib.request.Request(
             f"{SPEAKER_API_URL}/interrupt",
             data=b"",
             method="POST"
         )
-        urllib.request.urlopen(req, timeout=1.0).close()
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return int(json.loads(resp.read()).get("epoch", 0))
     except Exception:
-        pass  # Non-critical — recording continues regardless
+        return 0  # Non-critical — recording continues regardless
+
+
+async def _stream_to_asr(frames: list, epoch: int) -> None:
+    """Stream recorded PCM frames to asr_server over WebSocket for transcription."""
+    try:
+        async with websockets.connect(ASR_WS_URL) as ws:
+            for frame in frames:
+                await ws.send(frame.astype(np.int16).tobytes())
+            await ws.send(json.dumps({"done": True, "epoch": epoch}))
+            try:
+                result = json.loads(await asyncio.wait_for(ws.recv(), timeout=10.0))
+                print(f"[Transcript: {result.get('text', '')}]")
+            except asyncio.TimeoutError:
+                print("[Warning: ASR server did not respond in time]")
+    except Exception as e:
+        print(f"[Warning: Could not reach ASR server: {e}]")
 
 SAMPLE_RATE = 16000
 # OpenWakeWord processes audio in chunks (typically 1280 samples = 80ms at 16kHz)
@@ -40,7 +79,6 @@ VAD_FRAME_DURATION_MS = 30
 VAD_FRAME_SIZE = int(SAMPLE_RATE * VAD_FRAME_DURATION_MS / 1000)
 SILENCE_DURATION_MS = int(os.getenv("SILENCE_DURATION_MS", "1800"))
 SILENCE_FRAMES = int(SILENCE_DURATION_MS / VAD_FRAME_DURATION_MS)
-OUTPUT_WAV = "utterance.wav"
 # Detection threshold for wake word (adjust between 0.0 and 1.0)
 WAKE_WORD_THRESHOLD = 0.5
 # Cooldown period after detection (seconds) - prevents immediate re-detection
@@ -118,9 +156,10 @@ def record_after_wake():
                 prediction[wake_word_name] > WAKE_WORD_THRESHOLD):
                 
                 last_detection_time = current_time
-                print("[Wake word detected!] Interrupting speaker and recording...")
-                _interrupt_speaker()
+                print("[Wake word detected!]")
+                epoch = _interrupt_speaker()
                 _play_wake_chime()
+                _set_face_state("listening")
                 frames = []
                 silence_counter = 0
                 # Buffer for VAD processing (need 30ms frames for VAD)
@@ -130,12 +169,12 @@ def record_after_wake():
                     frame = stream.read(OWW_FRAME_LENGTH)[0].flatten()
                     frames.append(frame)
                     vad_buffer = np.concatenate([vad_buffer, frame])
-                    
+
                     # Process VAD when we have enough samples (30ms = 480 samples)
                     while len(vad_buffer) >= VAD_FRAME_SIZE:
                         vad_frame = vad_buffer[:VAD_FRAME_SIZE]
                         vad_buffer = vad_buffer[VAD_FRAME_SIZE:]
-                        
+
                         if is_speech(vad_frame, vad):
                             silence_counter = 0
                         else:
@@ -143,19 +182,12 @@ def record_after_wake():
                             if silence_counter > SILENCE_FRAMES:
                                 print("[Silence detected. Stopping recording.]")
                                 break
-                    
+
                     if silence_counter > SILENCE_FRAMES:
                         break
 
-                audio = np.concatenate(frames).astype(np.int16)
-
-                with wave.open(OUTPUT_WAV, 'wb') as wf:
-                    wf.setnchannels(1)
-                    wf.setsampwidth(2)
-                    wf.setframerate(SAMPLE_RATE)
-                    wf.writeframes(audio.tobytes())
-
-                print(f"[Audio saved to {OUTPUT_WAV}]")
+                print(f"[Streaming {len(frames)} frames to ASR server (epoch={epoch})...]")
+                asyncio.run(_stream_to_asr(frames, epoch))
                 
                 # Flush model state by processing silence frames during cooldown
                 print(f"[Cooldown period: {COOLDOWN_SECONDS}s - flushing model state...]")

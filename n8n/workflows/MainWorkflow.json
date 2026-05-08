@@ -4,9 +4,9 @@
     {
       "parameters": {
         "promptType": "define",
-        "text": "={{ (() => { try { return $('ASR: Whisper').first().json.text; } catch(e) { try { return $('When chat message received').first().json.chatInput; } catch(e2) { return ''; } } })() }}",
+        "text": "={{ (() => { try { return $('ASR Webhook Trigger').first().json.body.text; } catch(e) { try { return $('When chat message received').first().json.chatInput; } catch(e2) { return ''; } } })() }}",
         "options": {
-          "systemMessage": "=You are Lynx, an AI assistant on a SPOT robot at CU Denver. You help people on campus using real-time perception and CU Denver databases. Only answer CU Denver-related questions. For anything else: \"I'm specialized for CU Denver \u2014 anything campus-related I can help with?\" PERCEPTION You have real-time vision. Your current scene and detected people are provided below in CURRENT CONTEXT. Assume the person detected by face recognition IS the person speaking to you \u2014 treat them as your conversation partner, address them by name, and personalize all responses to them. Use this proactively and reference your surroundings naturally when relevant. TOOLS - cu_denver_faculty_search \u2192 any question about a specific person (faculty, staff, researchers) input: {\"input\": \"search text\"} - cu_denver_search \u2192 everything else (buildings, programs, admissions, events, policies) input: {\"input\": \"search text\"} - register_face \u2192 when someone tells you their name or introduces themselves. Call immediately when you hear a name. input: {\"name\": \"their name\"} If both person + topic \u2192 call both tools. RULES - Use they/them for unknown gender. - If tools don't answer it: \"Try contacting [office] or ucdenver.edu directly.\" - Offer \"Want me to send more details?\" for complex topics. - After calling register_face, always use the exact text in the \"suggest_reply\" field of the response as your reply \u2014 do not paraphrase it. CURRENT CONTEXT Time: {{ $json.current_time || 'unknown' }} Day: {{ $json.day_of_week || 'unknown' }} Location: {{ $json.location || 'Unknown' }} Person speaking to you (identified by face recognition): {{ JSON.stringify($json.faces || []) }} Scene: {{ $json.scene_caption || $json.scene_memo || 'No scene data.' }} {{ $json.personalization_context || '' }}"
+          "systemMessage": "=You are Lynx, an AI assistant on a SPOT robot at CU Denver. You help people on campus using real-time perception and CU Denver databases. Only answer CU Denver-related questions. For anything else: \"I'm specialized for CU Denver — anything campus-related I can help with?\" PERCEPTION You have real-time vision. Your current scene and detected people are provided below in CURRENT CONTEXT. Assume the person detected by face recognition IS the person speaking to you — treat them as your conversation partner, address them by name, and personalize all responses to them. Use this proactively and reference your surroundings naturally when relevant. TOOLS - cu_denver_faculty_search → any question about a specific person (faculty, staff, researchers) input: {\"input\": \"search text\"} - cu_denver_search → everything else (buildings, programs, admissions, events, policies) input: {\"input\": \"search text\"} - register_face → when someone tells you their name or introduces themselves. Call immediately when you hear a name. input: {\"name\": \"their name\"} If both person + topic → call both tools. RULES - Use they/them for unknown gender. - If tools don't answer it: \"Try contacting [office] or ucdenver.edu directly.\" - Offer \"Want me to send more details?\" for complex topics. - After calling register_face, always use the exact text in the \"suggest_reply\" field of the response as your reply — do not paraphrase it. CURRENT CONTEXT Time: {{ $json.current_time || 'unknown' }} Day: {{ $json.day_of_week || 'unknown' }} Location: {{ $json.location || 'Unknown' }} Person speaking to you (identified by face recognition): {{ JSON.stringify($json.faces || []) }} Scene: {{ $json.scene_caption || $json.scene_memo || 'No scene data.' }} {{ $json.personalization_context || '' }}"
         }
       },
       "type": "@n8n/n8n-nodes-langchain.agent",
@@ -21,70 +21,20 @@
     },
     {
       "parameters": {
-        "triggerOn": "folder",
-        "path": "/data/asr",
-        "events": [
-          "add",
-          "change"
-        ],
-        "options": {
-          "followSymlinks": true,
-          "usePolling": true
-        }
+        "httpMethod": "POST",
+        "path": "asr-transcript",
+        "responseMode": "onReceived",
+        "options": {}
       },
-      "type": "n8n-nodes-base.localFileTrigger",
-      "typeVersion": 1,
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
       "position": [
         -2544,
         -48
       ],
-      "id": "8c1452fc-caa9-4ca2-a23a-80729efd6808",
-      "name": "Local File Trigger",
-      "retryOnFail": false,
-      "alwaysOutputData": false,
-      "executeOnce": false
-    },
-    {
-      "parameters": {
-        "fileSelector": "={{ $('Local File Trigger').item.json.path }}",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.readWriteFile",
-      "typeVersion": 1,
-      "position": [
-        -1824,
-        -48
-      ],
-      "id": "317eebf7-fdf0-49a6-8b4d-d97384ea7f1f",
-      "name": "Read/Write Files from Disk"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "http://host.docker.internal:8002/transcribe",
-        "sendHeaders": true,
-        "headerParameters": {
-          "parameters": [
-            {
-              "name": "Content-Type",
-              "value": "audio/wav"
-            }
-          ]
-        },
-        "sendBody": true,
-        "contentType": "binaryData",
-        "inputDataFieldName": "data",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.3,
-      "position": [
-        -1536,
-        -48
-      ],
-      "id": "0003aee8-bb46-4f38-9b97-f22b41277d30",
-      "name": "ASR: Whisper",
-      "executeOnce": false
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "ASR Webhook Trigger",
+      "webhookId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     },
     {
       "parameters": {
@@ -310,45 +260,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "http://host.docker.internal:8001/interrupt",
-        "options": {}
-      },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.3,
-      "position": [
-        -2320,
-        -48
-      ],
-      "id": "c24ff371-9ebb-4a1d-8bfb-a748779bcbd1",
-      "name": "Speaker1"
-    },
-    {
-      "parameters": {
-        "assignments": {
-          "assignments": [
-            {
-              "id": "58d181a3-5b4d-439e-b53e-16a0294706b8",
-              "name": "epoch",
-              "value": "={{$json.epoch}}",
-              "type": "string"
-            }
-          ]
-        },
-        "options": {}
-      },
-      "type": "n8n-nodes-base.set",
-      "typeVersion": 3.4,
-      "position": [
-        -2064,
-        -48
-      ],
-      "id": "5bf1535c-800a-40d6-9792-027c192a06c5",
-      "name": "Edit Fields"
-    },
-    {
-      "parameters": {
-        "method": "POST",
-        "url": "=http://host.docker.internal:8001/play?epoch={{ $('Edit Fields').item.json.epoch }}",
+        "url": "=http://host.docker.internal:8001/play?epoch={{ $('ASR Webhook Trigger').first().json.body.epoch }}",
         "sendHeaders": true,
         "headerParameters": {
           "parameters": [
@@ -371,37 +283,84 @@
       ],
       "id": "fe2ec160-1aaa-4fdc-b33d-fb65bd0aad02",
       "name": "Speaker"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FACE_SERVICE_URL }}/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"listening\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-1680, -240],
+      "id": "fa000001-face-0000-0000-000000000001",
+      "name": "Face: Listening",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FACE_SERVICE_URL }}/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"state\": \"echo\", \"text\": \"{{ $json.text || '' }}\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-1368, -240],
+      "id": "fa000002-face-0000-0000-000000000002",
+      "name": "Face: Echo",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FACE_SERVICE_URL }}/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"thinking\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [-672, -200],
+      "id": "fa000003-face-0000-0000-000000000003",
+      "name": "Face: Thinking",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.FACE_SERVICE_URL }}/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"idle\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [368, 48],
+      "id": "fa000004-face-0000-0000-000000000004",
+      "name": "Face: Idle",
+      "continueOnFail": true
     }
   ],
   "pinData": {},
   "connections": {
-    "Local File Trigger": {
-      "main": [
-        [
-          {
-            "node": "Speaker1",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Read/Write Files from Disk": {
-      "main": [
-        [
-          {
-            "node": "ASR: Whisper",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "ASR: Whisper": {
+    "ASR Webhook Trigger": {
       "main": [
         [
           {
             "node": "Get Vision State",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Face: Echo",
             "type": "main",
             "index": 0
           }
@@ -426,6 +385,11 @@
             "node": "LLM - Ollama 3",
             "type": "main",
             "index": 0
+          },
+          {
+            "node": "Face: Thinking",
+            "type": "main",
+            "index": 0
           }
         ]
       ]
@@ -435,6 +399,17 @@
         [
           {
             "node": "Speaker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Speaker": {
+      "main": [
+        [
+          {
+            "node": "Face: Idle",
             "type": "main",
             "index": 0
           }
@@ -532,28 +507,6 @@
     "Simple Memory": {
       "ai_memory": [
         []
-      ]
-    },
-    "Speaker1": {
-      "main": [
-        [
-          {
-            "node": "Edit Fields",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Edit Fields": {
-      "main": [
-        [
-          {
-            "node": "Read/Write Files from Disk",
-            "type": "main",
-            "index": 0
-          }
-        ]
       ]
     }
   },
