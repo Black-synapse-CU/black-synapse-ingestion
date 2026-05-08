@@ -92,24 +92,15 @@ const providers = {
     extraAuthParams: {},
     callbackUrl: `${CALLBACK_BASE}/api/oauth/microsoft/callback`,
     n8nCredentialType: 'microsoftOutlookOAuth2Api',
-    async afterTokenExchange(tokens) {
-      // Fetch the user's UPN so n8n's microsoftOutlookOAuth2Api schema is satisfied
-      try {
-        const axios = require('axios');
-        const { data } = await axios.get('https://graph.microsoft.com/v1.0/me', {
-          headers: { Authorization: `Bearer ${tokens.access_token}` },
-        });
-        return { userPrincipalName: data.userPrincipalName || data.mail || '' };
-      } catch (e) {
-        console.warn('Could not fetch Microsoft userPrincipalName:', e.message);
-        return { userPrincipalName: '' };
-      }
-    },
-    buildCredentialData(tokens, extra = {}) {
+    buildCredentialData(tokens) {
+      const tenant = process.env.MICROSOFT_TENANT_ID || 'common';
       return {
         clientId: process.env.MICROSOFT_CLIENT_ID,
         clientSecret: process.env.MICROSOFT_CLIENT_SECRET,
-        userPrincipalName: extra.userPrincipalName || '',
+        authUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/authorize`,
+        accessTokenUrl: `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`,
+        graphApiBaseUrl: 'https://graph.microsoft.com',
+        useShared: false,
         ...n8nOAuth2TokenPayload(tokens),
       };
     },

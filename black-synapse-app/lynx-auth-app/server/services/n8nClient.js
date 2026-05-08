@@ -39,11 +39,7 @@ async function updateCredential(credentialId, name, type, data) {
  * Delete a credential from n8n (called on disconnect).
  */
 async function deleteCredential(credentialId) {
-  try {
-    await n8nAxios.delete(`/credentials/${credentialId}`);
-  } catch (err) {
-    if (err.response?.status !== 404) throw err;
-  }
+  await n8nAxios.delete(`/credentials/${credentialId}`);
 }
 
 /**

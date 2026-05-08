@@ -162,6 +162,42 @@ async def root():
     """Health check endpoint."""
     return {"message": "AtlasAI Worker - SPOT Robot AI System", "status": "healthy"}
 
+@app.get("/debug/ingest")
+async def debug_ingest(limit: int = 50):
+    """
+    Return a summary of all ingested documents.
+    Hit in browser: http://localhost:8000/debug/ingest
+    """
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    try:
+        with psycopg2.connect(pipeline.postgres_url) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT doc_id, source, title, uri, author,
+                           chunk_count, processed_at, is_deleted
+                    FROM documents
+                    WHERE is_deleted = FALSE
+                    ORDER BY processed_at DESC
+                    LIMIT %s
+                """, (limit,))
+                docs = [dict(r) for r in cur.fetchall()]
+
+                cur.execute("SELECT COUNT(*) AS total FROM documents WHERE is_deleted = FALSE")
+                total = cur.fetchone()["total"]
+
+                cur.execute("SELECT COUNT(*) AS total FROM document_chunks")
+                total_chunks = cur.fetchone()["total"]
+
+        return {
+            "total_documents": total,
+            "total_chunks": total_chunks,
+            "showing": len(docs),
+            "documents": docs,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/health")
 async def health_check():
     """Detailed health check including database connections."""
@@ -175,29 +211,6 @@ async def health_check():
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
-
-@app.get("/debug/ingest")
-async def debug_ingest_status(limit: int = 20):
-    """
-    Recent ingestion activity and overall chunk/document counts.
-
-    Query params:
-      limit  Number of recent log entries to return (default 20)
-    """
-    return await pipeline.get_ingest_status(limit=limit)
-
-
-@app.get("/debug/chunks/{doc_id}")
-async def debug_document_chunks(doc_id: str):
-    """
-    Show every stored chunk for a document: index, character count, text preview,
-    and whether an embedding was saved.
-    """
-    result = await pipeline.get_document_chunks(doc_id)
-    if "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
-    return result
-
 
 @app.post("/ingest", response_model=IngestionResponse)
 async def ingest_document(

@@ -83,7 +83,7 @@ export default function FileUploads({ onToast }) {
       <div style={s.head}>
         <div>
           <h2 style={s.title}>File uploads</h2>
-          <p style={s.blurb}>PDFs are forwarded to the ingestion worker and embedded into Qdrant.</p>
+          <p style={s.blurb}>PDFs are forwarded to the ingestion worker and embedded into the vector database.</p>
         </div>
       </div>
 

@@ -1,0 +1,3 @@
+deepface
+tf-keras
+ultralytics
