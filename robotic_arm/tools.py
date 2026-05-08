@@ -287,6 +287,48 @@ def _ik_to_normalized(
 # ===========================================================================
 
 
+def turn_head(
+    orch: ServoOrchestrator,
+    pan: Optional[float] = None,
+    tilt: Optional[float] = None,
+    duration_s: float = 0.6,
+) -> str:
+    """
+    Smoothly move the head to a pan/tilt position.
+
+    Omitting pan or tilt preserves the current position for that axis.
+
+    Args:
+        orch:       Live, opened ServoOrchestrator instance.
+        pan:        Left/right turn, normalised -1..1 (-1 = full right, 1 = full left). None = keep current.
+        tilt:       Up/down tilt, normalised -1..1 (-1 = up, 1 = down). None = keep current.
+        duration_s: Time in seconds to reach the target pose.
+
+    Returns:
+        Human-readable status string.
+    """
+    if orch._head_ctl is None:
+        return "Error: no head configured in layout."
+
+    from action_servos.groups import normalized_to_us
+    L = orch.layout
+    last_pan, last_tilt = orch._head_ctl.last_pulses
+
+    pan_us  = (normalized_to_us(L.head_pan,  pan)  if L.head_pan  is not None else 0.0) \
+              if pan  is not None else \
+              (last_pan  if last_pan  is not None else (L.head_pan.center_us  if L.head_pan  is not None else 0.0))
+
+    tilt_us = (normalized_to_us(L.head_tilt, tilt) if L.head_tilt is not None else 0.0) \
+              if tilt is not None else \
+              (last_tilt if last_tilt is not None else (L.head_tilt.center_us if L.head_tilt is not None else 0.0))
+
+    orch.head.move_ramp(pan_us, tilt_us, duration_s=duration_s, steps=30)
+
+    pan_desc  = f"pan={pan:+.2f}"   if pan  is not None else "pan=unchanged"
+    tilt_desc = f"tilt={tilt:+.2f}" if tilt is not None else "tilt=unchanged"
+    return f"Head moved: {pan_desc}, {tilt_desc}."
+
+
 def wave_hello(orch: ServoOrchestrator) -> str:
     """
     Wave hello for approximately 11 seconds.

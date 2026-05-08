@@ -58,6 +58,8 @@ services:
       - ./ASR:/data/asr
     depends_on:
       - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:5678/healthz"]
       interval: 15s
@@ -84,6 +86,8 @@ services:
       - ./ASR:/data/asr
     depends_on:
       - redis
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   postgres:
     image: pgvector/pgvector:pg16

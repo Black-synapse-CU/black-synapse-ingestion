@@ -76,17 +76,26 @@ def test_joint_spec_channel_bounds() -> None:
 
 def test_servo_layout_default() -> None:
     L = ServoLayout.default_layout()
-    assert L.base.channel        == 0
-    assert L.shoulder_a.channel  == 1
-    assert L.shoulder_b.channel  == 2
-    assert L.elbow.channel       == 3
-    assert L.wrist_pitch.channel == 4
-    assert L.wrist_roll.channel  == 5
-    assert L.gripper.channel     == 6
-    assert L.shoulder_b_inv is True
-    assert L.head_pan  is None
-    assert L.head_tilt is None
-    assert L.ear       is None
+    assert L.base.channel       == 0
+    assert L.shoulder_a.channel   == 1
+    assert L.shoulder_a.min_us    == 1500.0
+    assert L.shoulder_a.max_us    == 2300.0
+    assert L.shoulder_a.center_us == 1900.0
+    assert L.shoulder_b.channel   == 3
+    assert L.wrist_tilt is not None
+    assert L.wrist_tilt.channel == 4
+    assert L.elbow.channel      == 7
+    assert L.head_pan  is not None
+    assert L.head_pan.channel   == 5
+    assert L.head_pan.min_us    == 1000.0
+    assert L.head_pan.max_us    == 2500.0
+    assert L.head_pan.center_us == 1700.0
+    assert L.head_tilt is not None
+    assert L.head_tilt.channel   == 6
+    assert L.head_tilt.min_us    == 1200.0
+    assert L.head_tilt.max_us    == 2500.0
+    assert L.head_tilt.center_us == 1700.0
+    assert L.ear is None
 
 
 def test_presets_head_pose() -> None:
@@ -102,27 +111,9 @@ def test_arm_set_all_writes_channels() -> None:
     pca = _mock_pca()
     arm = _arm(pca)
     L = _layout()
-    arm.set_all(1500, 1500, 1500, 1500, 1500, 1500)
-    # base, shoulder_a, shoulder_b (mirrored = same at centre), elbow, wrist_pitch, wrist_roll, gripper
+    arm.set_all(1500, 1500, 1500)
     channels_written = {call.args[0] for call in pca.set_channel_pulse_us.call_args_list}
-    assert channels_written == {
-        L.base.channel, L.shoulder_a.channel, L.shoulder_b.channel,
-        L.elbow.channel, L.wrist_pitch.channel, L.wrist_roll.channel, L.gripper.channel,
-    }
-
-
-def test_arm_shoulder_mirror() -> None:
-    """shoulder_b should receive the mirrored pulse when shoulder_b_inv=True."""
-    pca = _mock_pca()
-    arm = _arm(pca)
-    L = _layout()
-    # Send shoulder_a = 1800 µs (above centre 1500)
-    arm.set_all(1500, 1800, 1500, 1500, 1500, 1500)
-    # Expected mirror: 2*1500 - 1800 = 1200
-    calls_by_ch = {call.args[0]: call.args[1]
-                   for call in pca.set_channel_pulse_us.call_args_list}
-    assert calls_by_ch[L.shoulder_a.channel] == pytest.approx(1800.0)
-    assert calls_by_ch[L.shoulder_b.channel] == pytest.approx(1200.0)
+    assert channels_written == {L.base.channel, L.shoulder_a.channel, L.shoulder_b.channel, L.elbow.channel}
 
 
 def test_arm_release_calls_full_off() -> None:
@@ -132,27 +123,21 @@ def test_arm_release_calls_full_off() -> None:
     arm.release()
     assert arm._released is True
     channels_off = {call.args[0] for call in pca.set_channel_full_off.call_args_list}
-    expected = {
-        L.base.channel, L.shoulder_a.channel, L.shoulder_b.channel,
-        L.elbow.channel, L.wrist_pitch.channel, L.wrist_roll.channel, L.gripper.channel,
-    }
+    expected = {L.base.channel, L.shoulder_a.channel, L.shoulder_b.channel, L.elbow.channel, L.wrist_tilt.channel}
     assert channels_off == expected
 
 
 def test_arm_resume_restores_last_state() -> None:
     pca = _mock_pca()
     arm = _arm(pca)
-    arm.set_all(1600, 1700, 1400, 1550, 1480, 1300)
+    arm.set_all(1600, 1700, 1400)
     arm.release()
     arm.resume()
     assert arm._released is False
     s = arm.last_state
-    assert s.base        == pytest.approx(1600.0)
-    assert s.shoulder    == pytest.approx(1700.0)
-    assert s.elbow       == pytest.approx(1400.0)
-    assert s.wrist_pitch == pytest.approx(1550.0)
-    assert s.wrist_roll  == pytest.approx(1480.0)
-    assert s.gripper     == pytest.approx(1300.0)
+    assert s.base     == pytest.approx(1600.0)
+    assert s.shoulder == pytest.approx(1700.0)
+    assert s.elbow    == pytest.approx(1400.0)
 
 
 def test_arm_resume_defaults_to_centre() -> None:
@@ -161,12 +146,9 @@ def test_arm_resume_defaults_to_centre() -> None:
     L = _layout()
     arm.resume()   # no prior set_all — should use centre_us
     s = arm.last_state
-    assert s.base        == pytest.approx(L.base.center_us)
-    assert s.shoulder    == pytest.approx(L.shoulder_a.center_us)
-    assert s.elbow       == pytest.approx(L.elbow.center_us)
-    assert s.wrist_pitch == pytest.approx(L.wrist_pitch.center_us)
-    assert s.wrist_roll  == pytest.approx(L.wrist_roll.center_us)
-    assert s.gripper     == pytest.approx(L.gripper.center_us)
+    assert s.base     == pytest.approx(L.base.center_us)
+    assert s.shoulder == pytest.approx(L.shoulder_a.center_us)
+    assert s.elbow    == pytest.approx(L.elbow.center_us)
 
 
 # ---------------------------------------------------------------------------
@@ -200,10 +182,9 @@ def test_pose_from_normalized() -> None:
     orch = MagicMock()
     orch.layout = _layout()
     pose = Pose.from_normalized(orch, shoulder=0.0, elbow=0.0)
-    assert pose.shoulder == pytest.approx(1500.0)
+    assert pose.shoulder == pytest.approx(1900.0)  # center_us of shoulder_a
     assert pose.elbow    == pytest.approx(1500.0)
     assert pose.base is None
-    assert pose.gripper is None
 
 
 def test_sequence_play_visits_poses_in_order() -> None:
@@ -227,8 +208,8 @@ def test_sequence_play_visits_poses_in_order() -> None:
     orch._head_ctl = None
     orch._ear_ctl  = None
 
-    target1 = (1500, 1800, 1200, 1500, 1500, 1500)
-    target2 = (1500, 1500, 1500, 1500, 1500, 1500)
+    target1 = (1500, 1800, 1200)
+    target2 = (1500, 1500, 1500)
 
     seq = (
         Sequence()

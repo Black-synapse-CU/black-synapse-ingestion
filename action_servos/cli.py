@@ -15,7 +15,7 @@ from action_servos.groups import ServoOrchestrator, us_to_normalized
 from worker.app.arm_actions import execute_action
 
 # All logical arm joints in command order
-_ARM_JOINTS = ("base", "shoulder", "elbow")
+_ARM_JOINTS = ("base", "shoulder", "elbow", "wrist_tilt")
 
 
 def _add_joint_args(p: argparse.ArgumentParser) -> None:
@@ -44,6 +44,13 @@ def main(argv: list[str] | None = None) -> int:
     # arm — set any combination of joints
     p_arm = sub.add_parser("arm", help="Set one or more arm joints")
     _add_joint_args(p_arm)
+
+    # head — pan and/or tilt
+    p_head = sub.add_parser("head", help="Set head pan (turn) and/or tilt")
+    p_head.add_argument("--pan",     type=float, default=None, metavar="N",  help="pan normalised -1..1")
+    p_head.add_argument("--pan-us",  type=float, default=None, dest="pan_us", metavar="µs")
+    p_head.add_argument("--tilt",    type=float, default=None, metavar="N",  help="tilt normalised -1..1")
+    p_head.add_argument("--tilt-us", type=float, default=None, dest="tilt_us", metavar="µs")
 
     # sequence
     p_seq = sub.add_parser("sequence",
@@ -109,6 +116,30 @@ def main(argv: list[str] | None = None) -> int:
                 _resolve("shoulder", "shoulder_a"),
                 _resolve("elbow",    "elbow"),
             )
+            wt_us   = getattr(args, "wrist_tilt_us", None)
+            wt_norm = getattr(args, "wrist_tilt",    None)
+            if wt_us is not None or wt_norm is not None:
+                from action_servos.groups import normalized_to_us
+                us = float(wt_us) if wt_us is not None else normalized_to_us(L.wrist_tilt, wt_norm)
+                arm.set_wrist_tilt(us)
+
+        elif args.cmd == "head":
+            L = orch.layout
+            if orch._head_ctl is None:
+                print("error: no head configured in layout", file=sys.stderr)
+                return 1
+            from action_servos.groups import normalized_to_us
+            head = orch._head_ctl
+            lp = head.last_pulses
+            def _resolve_head(us_val, norm_val, spec, last) -> float:
+                if us_val is not None:
+                    return float(us_val)
+                if norm_val is not None:
+                    return normalized_to_us(spec, norm_val)
+                return last if last is not None else spec.center_us
+            pan_us  = _resolve_head(args.pan_us,  args.pan,  L.head_pan,  lp[0])
+            tilt_us = _resolve_head(args.tilt_us, args.tilt, L.head_tilt, lp[1])
+            head.set_pulses(pan_us, tilt_us)
 
         elif args.cmd == "sequence":
             try:

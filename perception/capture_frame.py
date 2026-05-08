@@ -21,7 +21,7 @@ log = logging.getLogger("perception")
 app = FastAPI(title="Perception Vision Service")
 
 # ── Tunables ──────────────────────────────────────────────────────────
-CAM_INDEX = int(os.getenv("CAM_INDEX", "1"))
+CAM_INDEX = int(os.getenv("CAM_INDEX", "0"))
 WIDTH = int(os.getenv("CAM_WIDTH", "1920"))
 HEIGHT = int(os.getenv("CAM_HEIGHT", "1080"))
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "90"))
@@ -121,7 +121,7 @@ def _get_deepface():
             from deepface import DeepFace
             _deepface = DeepFace
             log.info("DeepFace loaded")
-        except ImportError as exc:
+        except Exception as exc:
             log.warning("DeepFace not available: %s", exc)
     return _deepface
 

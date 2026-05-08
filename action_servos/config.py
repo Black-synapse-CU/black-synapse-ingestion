@@ -42,29 +42,6 @@ class JointSpec:
 
 @dataclass(frozen=True)
 class ServoLayout:
-    """
-    6-DOF arm (7 physical servos) + optional head/ear for AtlasAI robot.
-
-    Arm joints
-    ----------
-    base        — MG995   — pan rotation (Z-axis)
-    shoulder_a  — DS3225  — primary shoulder lift
-    shoulder_b  — DS3225  — secondary shoulder (mechanically coupled to shoulder_a)
-    elbow       — MG995   — forearm lift
-    wrist_pitch — SG90    — wrist up / down
-    wrist_roll  — SG90    — wrist rotation
-    gripper     — SG90    — open / close
-
-    shoulder_b_inv: if True shoulder_b is physically mirrored so it receives
-                    (2 × center_us − shoulder_a_pulse) to stay synchronised.
-
-    Head / ear (optional, retained for AtlasAI robot head assembly)
-    ---------------------------------------------------------------
-    head_pan    — optional pan servo
-    head_tilt   — optional tilt servo
-    ear         — optional ear servo
-    """
-
     # Arm — required
     base:           JointSpec
     shoulder_a:     JointSpec
@@ -74,6 +51,9 @@ class ServoLayout:
     # Arm — optional behaviour flag
     shoulder_b_inv: bool = True
 
+    # Arm — optional extra joints
+    wrist_tilt:     Optional[JointSpec] = None
+
     # Head / ear — optional
     head_pan:       Optional[JointSpec] = None
     head_tilt:      Optional[JointSpec] = None
@@ -81,18 +61,13 @@ class ServoLayout:
 
     @classmethod
     def default_layout(cls) -> ServoLayout:
-        """
-        Hardware-verified PCA9685 channel wiring (from robotic_arm/config.py):
-
-          ch 0  base        500–2500 µs, center=9°  (~600 µs)
-          ch 1  shoulder_a  500–2500 µs, center=1500 µs
-          ch 3  shoulder_b  900–1900 µs, center=1400 µs  (shoulder2, independent)
-          ch 5  elbow       1944–2500 µs, center=2500 µs (130°–180°)
-        """
         return cls(
-            base=JointSpec(0, min_us=500.0,  max_us=2500.0, center_us=600.0),
-            shoulder_a=JointSpec(1, min_us=500.0,  max_us=2500.0, center_us=1500.0),
-            shoulder_b=JointSpec(3, min_us=900.0,  max_us=1900.0, center_us=1400.0),
-            elbow=JointSpec(5, min_us=1944.0, max_us=2500.0, center_us=2500.0),
+            base=JointSpec(0),
+            shoulder_a=JointSpec(1, min_us=1500.0, max_us=2300.0, center_us=1900.0),
+            shoulder_b=JointSpec(3, min_us=1500.0, max_us=2300.0, center_us=1900.0),
+            wrist_tilt=JointSpec(4),
+            elbow=JointSpec(7),
             shoulder_b_inv=False,
+            head_pan=JointSpec(5,  min_us=1000.0, max_us=2500.0, center_us=1700.0),
+            head_tilt=JointSpec(6, min_us=1200.0, max_us=2500.0, center_us=1700.0),
         )

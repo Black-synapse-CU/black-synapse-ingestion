@@ -46,9 +46,10 @@ def us_to_normalized(spec: JointSpec, pulse_us: Optional[float]) -> float:
 
 @dataclass
 class ArmState:
-    base:     Optional[float] = None
-    shoulder: Optional[float] = None
-    elbow:    Optional[float] = None
+    base:       Optional[float] = None
+    shoulder:   Optional[float] = None
+    elbow:      Optional[float] = None
+    wrist_tilt: Optional[float] = None
 
 
 class ArmController:
@@ -91,7 +92,7 @@ class ArmController:
         b  = clamp_pulse(L.base,  base_us)
         el = clamp_pulse(L.elbow, elbow_us)
 
-        self._pca.set_channel_pulse_us(L.base.channel,  b)
+        self._pca.set_channel_pulse_us(L.base.channel, b)
         sh = self._write_shoulder(shoulder_us)
         self._pca.set_channel_pulse_us(L.elbow.channel, el)
 
@@ -111,11 +112,24 @@ class ArmController:
     def center(self) -> None:
         L = self._L
         self.set_all(L.base.center_us, L.shoulder_a.center_us, L.elbow.center_us)
+        if L.wrist_tilt is not None:
+            self.set_wrist_tilt(L.wrist_tilt.center_us)
+
+    def set_wrist_tilt(self, pulse_us: float) -> None:
+        L = self._L
+        if L.wrist_tilt is None:
+            raise RuntimeError("No wrist_tilt spec in layout")
+        u = clamp_pulse(L.wrist_tilt, pulse_us)
+        self._pca.set_channel_pulse_us(L.wrist_tilt.channel, u)
+        self._state.wrist_tilt = u
 
     def release(self) -> None:
         """Cut PWM to all arm channels; servos go limp."""
         L = self._L
-        for spec in (L.base, L.shoulder_a, L.shoulder_b, L.elbow):
+        specs = [L.base, L.shoulder_a, L.shoulder_b, L.elbow]
+        if L.wrist_tilt is not None:
+            specs.append(L.wrist_tilt)
+        for spec in specs:
             self._pca.set_channel_full_off(spec.channel)
         self._released = True
 
@@ -128,6 +142,8 @@ class ArmController:
             s.shoulder if s.shoulder is not None else L.shoulder_a.center_us,
             s.elbow    if s.elbow    is not None else L.elbow.center_us,
         )
+        if L.wrist_tilt is not None:
+            self.set_wrist_tilt(s.wrist_tilt if s.wrist_tilt is not None else L.wrist_tilt.center_us)
         self._released = False
 
     def reset(self) -> None:
@@ -141,7 +157,6 @@ class ArmController:
         _r(L.base,  s.base)
         _r(L.elbow, s.elbow)
 
-        # Shoulder A + mirrored B
         sh = s.shoulder if s.shoulder is not None else L.shoulder_a.center_us
         self._pca.reset_channel(L.shoulder_a.channel, sh)
         if L.shoulder_b_inv:
