@@ -42,7 +42,7 @@ except ImportError:
 
 # ── Config ────────────────────────────────────────────────────────────
 POSTGRES_URL = os.getenv("POSTGRES_URL", "postgresql://postgres:postgres@localhost:5432/atlasai")
-DEFAULT_DOCS_DIR = "/home/ubuntu/Documents"
+DEFAULT_DOCS_DIR = "/home/blacksynapse/Documents"
 
 AZURE_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
