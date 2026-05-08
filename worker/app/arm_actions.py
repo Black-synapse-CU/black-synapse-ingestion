@@ -66,11 +66,11 @@ def _wave_sequence(orch: ServoOrchestrator) -> Sequence:
 
     return (
         Sequence()
-        .add(p(0.5, 0.3),  duration_s=2.0, steps=_SLOW_STEPS)  # raise arm
-        .add(p(0.5, 0.7),  duration_s=1.5, steps=_SLOW_STEPS)  # wave out
-        .add(p(0.5, 0.1),  duration_s=1.5, steps=_SLOW_STEPS)  # wave in
-        .add(p(0.5, 0.7),  duration_s=1.5, steps=_SLOW_STEPS)  # wave out
-        .add(p(0.5, 0.1),  duration_s=1.5, steps=_SLOW_STEPS)  # wave in
+        .add(p(0.7, 0.3),  duration_s=2.0, steps=_SLOW_STEPS)  # raise arm
+        .add(p(0.7, 0.7),  duration_s=1.5, steps=_SLOW_STEPS)  # wave out
+        .add(p(0.7, 0.1),  duration_s=1.5, steps=_SLOW_STEPS)  # wave in
+        .add(p(0.7, 0.7),  duration_s=1.5, steps=_SLOW_STEPS)  # wave out
+        .add(p(0.7, 0.1),  duration_s=1.5, steps=_SLOW_STEPS)  # wave in
         .add(p(0.0, 0.0),  duration_s=2.0, steps=_SLOW_STEPS)  # return neutral
     )
 

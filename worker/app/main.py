@@ -20,6 +20,8 @@ from .scraper import scrape_url
 from .qr_analyzer import decode_qr_from_bytes, decode_qr_from_base64, classify_qr_content
 from .pdf_processor import extract_pdf_content
 import asyncio
+import threading
+import time
 import uuid
 from datetime import datetime
 
@@ -53,6 +55,16 @@ app.add_middleware(
 
 # Initialize ingestion pipeline
 pipeline = IngestionPipeline()
+
+
+@app.on_event("startup")
+def _start_vision_loop() -> None:
+    if ARM_VISION_LOOP_ENABLED:
+        t = threading.Thread(target=_vision_loop, daemon=True, name="arm-vision-loop")
+        t.start()
+        logger.info("Arm vision loop enabled (interval=%.1fs)", ARM_VISION_INTERVAL)
+    else:
+        logger.info("Arm vision loop disabled (set ARM_VISION_LOOP_ENABLED=true to enable)")
 
 # Arm servo orchestrator — None if hardware unavailable (worker still starts cleanly)
 _servo_bus = int(os.getenv("SERVO_I2C_BUS", str(DEFAULT_I2C_BUS)))
@@ -569,6 +581,394 @@ async def arm_action(request: ArmActionRequest):
     except Exception as e:
         logger.error("Arm action '%s' failed: %s", request.action, e)
         raise HTTPException(status_code=500, detail=f"Arm action failed: {e}")
+
+
+# ── Vision-react: camera → GPT-4o mini → arm action ──────────────────
+
+_arm_cam_raw = os.getenv("ARM_CAM_INDEX", "0")
+ARM_CAM_INDEX: "int | str" = int(_arm_cam_raw) if _arm_cam_raw.lstrip("-").isdigit() else _arm_cam_raw
+# Flip code passed to cv2.flip: -1=both axes (180°), 0=vertical, 1=horizontal, ""=no flip
+ARM_CAM_FLIP = os.getenv("ARM_CAM_FLIP", "")
+
+# Tracking / scan state (only mutated inside _arm_lock)
+_scan_base: float = 0.0
+_scan_base_dir: float = 1.0
+_scan_shoulder: float = 0.35   # matches ARM_TRACK_Y_BIAS default — scan starts at standing height
+_scan_shoulder_dir: float = 1.0
+ARM_TRACK_SCAN_STEP_BASE     = float(os.getenv("ARM_TRACK_SCAN_STEP_BASE",     "0.08"))
+ARM_TRACK_SCAN_STEP_SHOULDER = float(os.getenv("ARM_TRACK_SCAN_STEP_SHOULDER", "0.05"))
+ARM_TRACK_SCAN_LIMIT_BASE    = float(os.getenv("ARM_TRACK_SCAN_LIMIT_BASE",    "0.85"))
+ARM_TRACK_SCAN_LIMIT_SHOULDER= float(os.getenv("ARM_TRACK_SCAN_LIMIT_SHOULDER","0.75"))
+# Set ARM_SHOULDER_INVERT=true if shoulder moves down when it should move up
+_SHOULDER_SIGN = -1.0 if os.getenv("ARM_SHOULDER_INVERT", "false").lower() == "true" else 1.0
+
+# Smoothing: EMA alpha (lower = smoother but slower to respond)
+# Deadband: minimum smoothed change before the arm actually moves
+ARM_TRACK_SMOOTH_ALPHA = float(os.getenv("ARM_TRACK_SMOOTH_ALPHA", "0.5"))
+ARM_TRACK_DEADBAND     = float(os.getenv("ARM_TRACK_DEADBAND",     "0.08"))
+# Bias added to every shoulder target — shifts the default aim upward (positive = up)
+ARM_TRACK_Y_BIAS       = float(os.getenv("ARM_TRACK_Y_BIAS",       "0.35"))
+_smooth_x:        float = 0.0
+_smooth_y:        float = ARM_TRACK_Y_BIAS   # start EMA at the bias so first move is already up
+_last_cmd_base:   float = 0.0
+_last_cmd_shoulder: float = ARM_TRACK_Y_BIAS * ARM_TRACK_SCAN_LIMIT_SHOULDER
+
+_VISION_ACTIONS = frozenset(("rest", "neutral", "extend", "retract", "point", "wave", "release"))
+
+_VISION_SYSTEM_PROMPT = (
+    "You are the decision engine for a robotic arm. "
+    "Analyse the image from the arm's camera and choose the single best action to perform. "
+    "Valid actions: rest, neutral, extend, retract, point, wave, release. "
+    "For extend and retract you may also specify amount (0–100 percent); set null for all other actions. "
+    "Reply with JSON only — no markdown, no extra keys:\n"
+    '{"action": "<action>", "amount": <integer or null>, "reason": "<one sentence>"}'
+)
+
+ARM_VISION_LOOP_ENABLED = os.getenv("ARM_VISION_LOOP_ENABLED", "false").lower() == "true"
+ARM_VISION_INTERVAL = float(os.getenv("ARM_VISION_INTERVAL", "1.0"))
+
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
+AZURE_OPENAI_DEPLOYMENT = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
+# Separate deployment for chat/vision — avoids using the embedding deployment for completions
+AZURE_CHAT_DEPLOYMENT = os.getenv("AZURE_CHAT_DEPLOYMENT", AZURE_OPENAI_DEPLOYMENT)
+ARM_VISION_PROMPT = os.getenv(
+    "ARM_VISION_PROMPT",
+    "Wave if you see a person. If nobody is visible, choose rest or neutral.",
+)
+
+# Prevents the background loop and manual HTTP calls from moving the arm simultaneously.
+_arm_lock = threading.Lock()
+
+
+_TRACK_SYSTEM_PROMPT = (
+    "You are a person-tracking controller for a robotic arm camera. "
+    "Detect whether any person is visible, then estimate where to point the camera to best face them. "
+    "x = -1.0 (far left) to +1.0 (far right), y = -1.0 (aim down) to +1.0 (aim up). Both 0.0 = center. "
+    "Important: infer the full body position, not just what is visible. "
+    "If only legs/feet are visible at the bottom, the torso is above frame — return y close to +1.0 to look up. "
+    "If only a head/shoulders are visible at the top, the body is centered — return y near 0.0 or slightly positive. "
+    "If the full body is visible, return y based on the torso center. "
+    "Reply with JSON only — no markdown:\n"
+    '{"person": true, "x": <float>, "y": <float>}  or  {"person": false}'
+)
+
+
+def _move_arm_to(base_norm: float, shoulder_norm: float, duration_s: float = 0.6) -> None:
+    """Move base and shoulder to normalized positions; hold elbow at its current position."""
+    from action_servos.groups import normalized_to_us
+    arm = _arm_orch.arm
+    L = _arm_orch.layout
+    s = arm.last_state
+    base_us     = normalized_to_us(L.base,       base_norm)
+    shoulder_us = normalized_to_us(L.shoulder_a, _SHOULDER_SIGN * shoulder_norm)
+    elbow_us    = s.elbow or L.elbow.center_us
+    arm.move_ramp(base_us, shoulder_us, elbow_us, duration_s=duration_s, steps=20)
+
+
+def _track_blocking(cam_index: "int | str") -> dict:
+    """Capture → Azure person detection → track person in 2D, or scan both axes."""
+    import base64, json, openai, httpx as _httpx
+    global _scan_base, _scan_base_dir, _scan_shoulder, _scan_shoulder_dir
+
+    if not AZURE_OPENAI_API_KEY:
+        raise RuntimeError("AZURE_OPENAI_API_KEY not configured")
+    if not AZURE_OPENAI_ENDPOINT:
+        raise RuntimeError("AZURE_OPENAI_ENDPOINT not configured")
+
+    jpg = _capture_arm_frame(cam_index)
+    if jpg is None:
+        raise RuntimeError(f"Could not capture frame from camera {cam_index}")
+
+    b64 = base64.b64encode(jpg).decode()
+    client = openai.AzureOpenAI(
+        api_key=AZURE_OPENAI_API_KEY,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_version=AZURE_OPENAI_API_VERSION,
+        http_client=_httpx.Client(),
+    )
+    resp = client.chat.completions.create(
+        model=AZURE_CHAT_DEPLOYMENT,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": _TRACK_SYSTEM_PROMPT},
+            {"role": "user", "content": [{"type": "image_url", "image_url": {
+                "url": f"data:image/jpeg;base64,{b64}", "detail": "low",
+            }}]},
+        ],
+        max_tokens=80,
+    )
+    raw = resp.choices[0].message.content or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"Model returned non-JSON: {raw!r}")
+
+    if data.get("person"):
+        global _smooth_x, _smooth_y, _last_cmd_base, _last_cmd_shoulder
+        x = max(-1.0, min(1.0, float(data.get("x", 0.0))))
+        y = max(-1.0, min(1.0, float(data.get("y", 0.0))))
+
+        # EMA smoothing to suppress noisy model estimates
+        _smooth_x = ARM_TRACK_SMOOTH_ALPHA * x + (1.0 - ARM_TRACK_SMOOTH_ALPHA) * _smooth_x
+        _smooth_y = ARM_TRACK_SMOOTH_ALPHA * y + (1.0 - ARM_TRACK_SMOOTH_ALPHA) * _smooth_y
+
+        target_base     = _smooth_x * ARM_TRACK_SCAN_LIMIT_BASE
+        target_shoulder = (_smooth_y + ARM_TRACK_Y_BIAS) * ARM_TRACK_SCAN_LIMIT_SHOULDER
+
+        # Only move if the smoothed position has shifted past the deadband
+        if (abs(target_base - _last_cmd_base) > ARM_TRACK_DEADBAND or
+                abs(target_shoulder - _last_cmd_shoulder) > ARM_TRACK_DEADBAND):
+            _move_arm_to(target_base, target_shoulder)
+            _last_cmd_base     = target_base
+            _last_cmd_shoulder = target_shoulder
+
+        _scan_base     = target_base
+        _scan_shoulder = target_shoulder
+        return {"tracked": True, "x": round(_smooth_x, 2), "y": round(_smooth_y, 2)}
+
+    # No person — advance both axes independently and bounce at their limits
+    def _step(pos: float, direction: float, step: float, limit: float):
+        pos += direction * step
+        if pos >= limit:
+            return limit, -1.0
+        if pos <= -limit:
+            return -limit, 1.0
+        return pos, direction
+
+    _scan_base,     _scan_base_dir     = _step(_scan_base,     _scan_base_dir,     ARM_TRACK_SCAN_STEP_BASE,     ARM_TRACK_SCAN_LIMIT_BASE)
+    _scan_shoulder, _scan_shoulder_dir = _step(_scan_shoulder, _scan_shoulder_dir, ARM_TRACK_SCAN_STEP_SHOULDER, ARM_TRACK_SCAN_LIMIT_SHOULDER)
+    _move_arm_to(_scan_base, _scan_shoulder)
+    return {"tracked": False, "base": _scan_base, "shoulder": _scan_shoulder}
+
+
+def _vision_loop() -> None:
+    """Background daemon: periodically capture → detect person → track or scan."""
+    logger.info(
+        "Vision loop started (interval=%.1fs, cam=%s)", ARM_VISION_INTERVAL, ARM_CAM_INDEX
+    )
+    while True:
+        time.sleep(ARM_VISION_INTERVAL)
+        if _arm_orch is None:
+            continue
+        if not _arm_lock.acquire(blocking=False):
+            logger.debug("Vision loop skipped — arm busy")
+            continue
+        try:
+            out = _track_blocking(ARM_CAM_INDEX)
+            if out["tracked"]:
+                logger.info("Track: person x=%.2f y=%.2f", out["x"], out["y"])
+            else:
+                logger.info("Scan: base=%.2f shoulder=%.2f", out["base"], out["shoulder"])
+        except Exception as exc:
+            logger.warning("Vision loop error: %s", exc)
+        finally:
+            _arm_lock.release()
+
+
+class VisionReactRequest(BaseModel):
+    """Optional overrides for the vision-react endpoint."""
+    prompt: Optional[str] = Field(
+        None,
+        description="Extra instruction appended to the system prompt, e.g. 'wave if you see a person waving'.",
+    )
+    cam_index: Optional[int] = Field(
+        None,
+        description="Camera device index. Defaults to ARM_CAM_INDEX env var (default 0).",
+    )
+
+
+class VisionReactResponse(BaseModel):
+    success: bool
+    action: str
+    amount: Optional[int]
+    reason: str
+    result: str
+
+
+def _capture_arm_frame(cam_index: int) -> Optional[bytes]:
+    """Open the arm camera, grab one JPEG frame, release immediately."""
+    import cv2, sys
+    backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
+    cap = cv2.VideoCapture(cam_index, backend)
+    if not cap.isOpened():
+        return None
+    try:
+        for _ in range(5):  # flush stale buffered frames
+            cap.read()
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return None
+        if ARM_CAM_FLIP != "":
+            frame = cv2.flip(frame, int(ARM_CAM_FLIP))
+        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        return buf.tobytes() if ok else None
+    finally:
+        cap.release()
+
+
+def _vision_react_blocking(cam_index: int, extra_prompt: Optional[str]) -> dict:
+    """Blocking: capture → Azure GPT-4o mini → execute arm action. Run in executor."""
+    import base64, json, openai, httpx as _httpx
+
+    if not AZURE_OPENAI_API_KEY:
+        raise RuntimeError("AZURE_OPENAI_API_KEY not configured")
+    if not AZURE_OPENAI_ENDPOINT:
+        raise RuntimeError("AZURE_OPENAI_ENDPOINT not configured")
+
+    jpg = _capture_arm_frame(cam_index)
+    if jpg is None:
+        raise RuntimeError(f"Could not capture frame from camera index {cam_index}")
+
+    b64 = base64.b64encode(jpg).decode()
+    system = _VISION_SYSTEM_PROMPT
+    if extra_prompt:
+        system += f"\n\nAdditional instruction: {extra_prompt}"
+
+    client = openai.AzureOpenAI(
+        api_key=AZURE_OPENAI_API_KEY,
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_version=AZURE_OPENAI_API_VERSION,
+        http_client=_httpx.Client(),
+    )
+    resp = client.chat.completions.create(
+        model=AZURE_CHAT_DEPLOYMENT,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{b64}",
+                            "detail": "low",
+                        },
+                    }
+                ],
+            },
+        ],
+        max_tokens=150,
+    )
+    raw = resp.choices[0].message.content or ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"GPT-4o mini returned non-JSON: {raw!r}")
+
+    action = str(data.get("action", "neutral")).strip().lower()
+    if action not in _VISION_ACTIONS:
+        raise RuntimeError(f"GPT-4o mini chose unknown action '{action}'")
+
+    amount = data.get("amount")
+    if isinstance(amount, float):
+        amount = int(amount)
+    reason = str(data.get("reason", ""))
+
+    arm_result = _execute_arm_action(_arm_orch, action, amount)
+    return {"action": action, "amount": amount, "reason": reason, "result": arm_result}
+
+
+@app.post("/arm/vision-react", response_model=VisionReactResponse)
+async def arm_vision_react(request: VisionReactRequest):
+    """
+    Capture a frame from the arm camera, ask GPT-4o mini which action to
+    perform, then execute that action on the physical arm.
+
+    Set ARM_CAM_INDEX env var (default 0) to select the arm camera device.
+    Optionally pass a custom prompt to give GPT-4o mini extra context.
+    """
+    if _arm_orch is None:
+        raise HTTPException(status_code=503, detail="Servo hardware unavailable.")
+    if not _arm_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Arm is busy — try again shortly.")
+    cam = request.cam_index if request.cam_index is not None else ARM_CAM_INDEX
+    try:
+        loop = asyncio.get_event_loop()
+        out = await loop.run_in_executor(
+            None, _vision_react_blocking, cam, request.prompt
+        )
+        return VisionReactResponse(success=True, **out)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error("arm/vision-react failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Vision-react failed: {e}")
+    finally:
+        _arm_lock.release()
+
+
+# ── Object identification: capture arm camera → describe what is shown ─
+
+class IdentifyRequest(BaseModel):
+    question: Optional[str] = Field(
+        None,
+        description="What to ask about the object, e.g. 'What is this?' or 'Can I eat this?'. Defaults to a general description.",
+    )
+
+
+class IdentifyResponse(BaseModel):
+    success: bool
+    description: str
+
+
+@app.post("/arm/identify", response_model=IdentifyResponse)
+async def arm_identify(request: IdentifyRequest):
+    """
+    Capture a frame from the arm camera and ask the vision model to identify
+    or describe what is being shown to it.
+
+    Useful for holding up an object in front of the arm and asking what it is.
+    The response can be passed to TTS to speak the answer aloud.
+    """
+    import base64, openai, httpx as _httpx
+
+    if not AZURE_OPENAI_API_KEY or not AZURE_OPENAI_ENDPOINT:
+        raise HTTPException(status_code=503, detail="Azure OpenAI not configured.")
+
+    jpg = _capture_arm_frame(ARM_CAM_INDEX)
+    if jpg is None:
+        raise HTTPException(status_code=503, detail=f"Could not capture frame from camera {ARM_CAM_INDEX}.")
+
+    question = request.question or "What object is being shown to you? Describe it clearly and concisely in one or two sentences."
+
+    b64 = base64.b64encode(jpg).decode()
+    try:
+        client = openai.AzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            api_version=AZURE_OPENAI_API_VERSION,
+            http_client=_httpx.Client(),
+        )
+        resp = client.chat.completions.create(
+            model=AZURE_CHAT_DEPLOYMENT,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are the vision system of a robotic arm. "
+                        "Answer questions about what the arm camera sees. "
+                        "Be concise and direct — your answer will be spoken aloud."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"}},
+                        {"type": "text", "text": question},
+                    ],
+                },
+            ],
+            max_tokens=200,
+        )
+        description = (resp.choices[0].message.content or "").strip()
+        logger.info("arm/identify: %s", description[:120])
+        return IdentifyResponse(success=True, description=description)
+    except Exception as e:
+        logger.error("arm/identify failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Identify failed: {e}")
 
 
 class HeadTurnRequest(BaseModel):

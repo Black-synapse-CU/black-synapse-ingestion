@@ -633,6 +633,27 @@ def _run_reconciliation(threshold: float) -> dict:
 
 
 # ── Camera helpers ────────────────────────────────────────────────────
+_LOGI_KEYWORDS = ("logitech", "brio", "c920", "c922", "c930", "c925", "c615", "c270", "logi")
+
+
+def _find_logitech_index() -> Optional[int]:
+    """Scan /sys/class/video4linux to find the lowest-numbered Logitech/Brio device."""
+    import glob
+    nodes = sorted(glob.glob("/sys/class/video4linux/video*/name"))
+    for path in nodes:
+        try:
+            name = open(path).read().strip().lower()
+        except OSError:
+            continue
+        if any(kw in name for kw in _LOGI_KEYWORDS):
+            # path is like /sys/class/video4linux/video0/name
+            dev_name = Path(path).parent.name  # e.g. "video0"
+            idx = int(dev_name.replace("video", ""))
+            log.info("Found Logitech camera '%s' at index %d", name, idx)
+            return idx
+    return None
+
+
 def _video_capture(index: int) -> cv2.VideoCapture:
     """Windows: DirectShow. Linux/Jetson: V4L2 (USB webcams). Else: OpenCV default."""
     if sys.platform == "win32":
@@ -643,16 +664,20 @@ def _video_capture(index: int) -> cv2.VideoCapture:
 
 
 def _open_camera() -> cv2.VideoCapture:
-    cap = _video_capture(CAM_INDEX)
+    index = _find_logitech_index()
+    if index is None:
+        log.warning("Logitech camera not found by name — falling back to CAM_INDEX=%d", CAM_INDEX)
+        index = CAM_INDEX
+    cap = _video_capture(index)
     if not cap.isOpened():
-        log.error("Failed to open camera at index %d — check CAM_INDEX and that no other process holds the device", CAM_INDEX)
+        log.error("Failed to open camera at index %d — check that no other process holds the device", index)
         return cap
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
     for _ in range(5):
         cap.read()
         time.sleep(0.02)
-    log.info("Camera opened: index=%d, %dx%d", CAM_INDEX, WIDTH, HEIGHT)
+    log.info("Camera opened: index=%d, %dx%d", index, WIDTH, HEIGHT)
     return cap
 
 

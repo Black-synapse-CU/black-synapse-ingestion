@@ -125,6 +125,47 @@ async def get_embedding_ollama(
         logging.error("Ollama embedding failed (model=%s): %s", model, e)
         raise
 
+
+async def get_embedding_azure(
+    texts: List[str],
+    api_key: str,
+    endpoint: str,
+    deployment: str,
+    api_version: str = "2024-02-01",
+) -> List[List[float]]:
+    """
+    Generate embeddings using Azure OpenAI embeddings deployment.
+
+    Args:
+        texts:      Texts to embed
+        api_key:    Azure OpenAI API key
+        endpoint:   Azure OpenAI endpoint URL
+        deployment: Embedding model deployment name
+        api_version: Azure API version
+
+    Returns:
+        List of embedding vectors, one per input text
+    """
+    if not texts:
+        return []
+    url = (
+        f"{endpoint.rstrip('/')}/openai/deployments/{deployment}"
+        f"/embeddings?api-version={api_version}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(
+                url,
+                headers={"api-key": api_key, "Content-Type": "application/json"},
+                json={"input": texts},
+            )
+            resp.raise_for_status()
+            data = resp.json()["data"]
+            return [item["embedding"] for item in sorted(data, key=lambda x: x["index"])]
+    except Exception as e:
+        logging.error("Azure embedding failed (deployment=%s): %s", deployment, e)
+        raise
+
 def validate_document_payload(payload: Dict[str, Any]) -> List[str]:
     """
     Validate a document payload against the unified schema.

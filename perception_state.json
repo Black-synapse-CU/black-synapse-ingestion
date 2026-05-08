@@ -1,14 +1,14 @@
 {
   "faces": [
     {
-      "name": "user_3",
+      "name": "user_41",
       "emotion": "neutral",
       "age": null,
       "gender": null,
-      "confidence": 0.6823370006082284
+      "confidence": 0.9204456960236632
     }
   ],
-  "scene_caption": "The scene appears to be indoors with a ceiling featuring linear wooden panels and recessed lights. Visible objects include a large, round hanging lamp with a metallic outer surface and a bright white diffuser that dominates the right side of the image, and a black cylindrical column near the center. The upper part of a person\u2019s head is visible near the bottom, but it is unclear what the person might be holding as their hands and any objects are not visible in the frame. There is another person partially visible on the left side, wearing a gray garment with a distinctive white pattern.",
+  "scene_caption": "The scene shows a person partially visible on the left side, seated in front of a dark chair and wearing a light-colored hoodie. Behind them is a dark chest of drawers topped with several books and a beige cap. On the right side of the image, there's a black and orange tool bag with an orange item sticking out, a small white box with a green label and QR code, a black trash bin, and a black table lamp with a pleated shade. The person does not appear to be holding anything visible in the image.",
   "location": null,
-  "updated_at": 1778209744.334206
+  "updated_at": 1778233770.352711
 }

@@ -22,7 +22,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import tiktoken
 
-from .utils import chunk_text, get_embedding_ollama, setup_logging
+from .utils import chunk_text, get_embedding_azure, setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -30,38 +30,15 @@ logger = logging.getLogger(__name__)
 class IngestionPipeline:
     """Main pipeline class for document processing and ingestion."""
 
-    # Maps known embedding models to their vector dimensions
-    _MODEL_DIMS = {
-        "nomic-embed-text": 768,
-        "mxbai-embed-large": 1024,
-        "all-minilm": 384,
-        "text-embedding-3-small": 1536,
-        "text-embedding-3-large": 3072,
-    }
-
     def __init__(self):
         self.postgres_url = os.getenv("POSTGRES_URL")
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
-        # Ollama — used for all embeddings
-        self.ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        self.embedding_model = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
-
-        # Resolve vector dimension: explicit env var wins, else look up model map
-        dim_override = os.getenv("EMBEDDING_DIM")
-        if dim_override:
-            try:
-                self.embedding_dim = int(dim_override)
-            except ValueError:
-                logger.warning("Invalid EMBEDDING_DIM '%s', falling back to model default", dim_override)
-                self.embedding_dim = self._MODEL_DIMS.get(self.embedding_model, 768)
-        else:
-            self.embedding_dim = self._MODEL_DIMS.get(self.embedding_model, 768)
-
-        logger.info(
-            "Embedding: model=%s dim=%d ollama=%s",
-            self.embedding_model, self.embedding_dim, self.ollama_url,
-        )
+        self.azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        self.azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        self.azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "text-embedding-3-small")
+        self.azure_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
+        self.embedding_dim = int(os.getenv("EMBEDDING_DIM", "1536"))
 
         # Optional OpenAI client — only used for PDF image vision fallback
         # when use_openai_vision=True is passed to /ingest/pdf
@@ -84,6 +61,24 @@ class IngestionPipeline:
 
     async def _ensure_schema(self):
         """Enable pgvector and create all tables + indexes."""
+        try:
+            with psycopg2.connect(self.postgres_url) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT pg_catalog.format_type(a.atttypid, a.atttypmod)
+                        FROM pg_attribute a JOIN pg_class c ON a.attrelid = c.oid
+                        WHERE c.relname = 'document_chunks'
+                          AND a.attname = 'embedding' AND a.attnum > 0
+                    """)
+                    row = cur.fetchone()
+                    if row and row[0].startswith("vector("):
+                        existing_dim = int(row[0][7:-1])
+                        if existing_dim != self.embedding_dim:
+                            cur.execute("DROP TABLE IF EXISTS document_chunks")
+                            cur.execute("DROP TABLE IF EXISTS chat_memory_chunks")
+                            conn.commit()
+        except Exception:
+            pass
         max_attempts = 10
         delay = 1
         for attempt in range(1, max_attempts + 1):
@@ -244,8 +239,12 @@ class IngestionPipeline:
             logger.info("Chunked document %s into %d chunks", document.doc_id, len(chunks))
 
             chunk_texts = [c["text"] for c in chunks]
-            embeddings = await get_embedding_ollama(
-                chunk_texts, model=self.embedding_model, ollama_url=self.ollama_url
+            embeddings = await get_embedding_azure(
+                chunk_texts,
+                api_key=self.azure_api_key,
+                endpoint=self.azure_endpoint,
+                deployment=self.azure_deployment,
+                api_version=self.azure_api_version,
             )
 
             await self._update_document_metadata(document, content_hash, len(chunks))
@@ -399,8 +398,12 @@ class IngestionPipeline:
                 chunks = chunk_text(full_text, self.tokenizer)
 
                 chunk_texts = [c["text"] for c in chunks]
-                embeddings = await get_embedding_ollama(
-                    chunk_texts, model=self.embedding_model, ollama_url=self.ollama_url
+                embeddings = await get_embedding_azure(
+                    chunk_texts,
+                    api_key=self.azure_api_key,
+                    endpoint=self.azure_endpoint,
+                    deployment=self.azure_deployment,
+                    api_version=self.azure_api_version,
                 )
 
                 with psycopg2.connect(self.postgres_url) as conn:
