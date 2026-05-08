@@ -69,5 +69,5 @@ class ServoLayout:
             elbow=JointSpec(7),
             shoulder_b_inv=False,
             head_pan=JointSpec(5,  min_us=1000.0, max_us=2500.0, center_us=1700.0),
-            head_tilt=JointSpec(6, min_us=1200.0, max_us=2500.0, center_us=1700.0),
+            head_tilt=JointSpec(6, min_us=1200.0, max_us=2200.0, center_us=1700.0),
         )

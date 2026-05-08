@@ -1,12 +1,12 @@
 {
   "faces": [
     {
-      "name": "user_8",
-      "emotion": "fear",
-      "age": 36,
-      "gender": "M",
-      "confidence": 0.9038078314122108
+      "name": "user_3",
+      "emotion": null,
+      "age": null,
+      "gender": null,
+      "confidence": 0.6823370006082284
     }
   ],
-  "updated_at": 1778203844.8408182
+  "updated_at": 1778209539.2048156
 }

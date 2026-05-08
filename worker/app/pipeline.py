@@ -119,8 +119,8 @@ class IngestionPipeline:
                                 title TEXT,
                                 uri TEXT,
                                 author VARCHAR(255),
-                                doc_created_at TEXT,
-                                doc_updated_at TEXT
+                                created_at TEXT,
+                                updated_at TEXT
                             )
                         """)
 
@@ -248,6 +248,8 @@ class IngestionPipeline:
                 chunk_texts, model=self.embedding_model, ollama_url=self.ollama_url
             )
 
+            await self._update_document_metadata(document, content_hash, len(chunks))
+
             with psycopg2.connect(self.postgres_url) as conn:
                 with conn.cursor() as cur:
                     cur.execute("DELETE FROM document_chunks WHERE doc_id = %s", (document.doc_id,))
@@ -255,7 +257,7 @@ class IngestionPipeline:
                         cur.execute("""
                             INSERT INTO document_chunks
                                 (doc_id, chunk_index, text, embedding,
-                                 source, title, uri, author, doc_created_at, doc_updated_at)
+                                 source, title, uri, author, created_at, updated_at)
                             VALUES (%s, %s, %s, %s::vector, %s, %s, %s, %s, %s, %s)
                         """, (
                             document.doc_id,
@@ -270,8 +272,6 @@ class IngestionPipeline:
                             document.updated_at,
                         ))
                     conn.commit()
-
-            await self._update_document_metadata(document, content_hash, len(chunks))
             await self._log_ingestion_event(
                 document.doc_id, "processed",
                 f"Successfully processed {len(chunks)} chunks",

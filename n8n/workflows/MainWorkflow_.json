@@ -1,0 +1,627 @@
+{
+  "name": "MainWorkflow_complete",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {
+          "responseMode": "streaming"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -992,
+        496
+      ],
+      "id": "7c986ea6-ecd2-4ab4-847f-b0dc6d387936",
+      "name": "When chat message received",
+      "webhookId": "4dde8d39-32d0-4624-8870-f5b12aec5858"
+    },
+    {
+      "parameters": {
+        "url": "http://172.17.0.1:8089/state",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -704,
+        160
+      ],
+      "id": "0b2af335-6c0b-49ab-b837-861ac49cfa08",
+      "name": "Get Vision State"
+    },
+    {
+      "parameters": {
+        "jsCode": "const state = $input.first().json;\nconst now = new Date();\n\nconst locations = {\n  \"LOC_001\": \"This is Room 2010. You can find 2 office rooms for 2 professors here. Professor Caroline Clevenger and Professor Moatassem Abdallah. Caroline teaches Construction Planning and Control. Moatassem teaches Building Information Modeling\",\n  \"LOC_002\": \"Hallway near elevators\",\n  \"LOC_003\": \"Charging station\",\n  \"LOC_004\": \"Whiteboard area\"\n};\n\nconst locationId = state.location;\nconst locationDescription = locations[locationId] || locationId || 'Unknown';\n\nreturn {\n  ...state,\n  location: locationDescription,\n  current_time: now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),\n  day_of_week: now.toLocaleDateString('en-US', { weekday: 'long' }),\n  date: now.toLocaleDateString('en-US')\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -384,
+        128
+      ],
+      "id": "91f4046e-1e61-4d26-90c1-dc37aa891044",
+      "name": "Enrich with Time"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://172.17.0.1:8001/play-now",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "audio/wav"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        672,
+        224
+      ],
+      "id": "67b65229-aca4-49f2-aa63-6c664d9cd792",
+      "name": "Speaker"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Register the name of the person currently visible on the camera. Call this as soon as someone tells you their name or introduces themselves. The camera will automatically capture their face. Input: {\"name\": \"the person's name\"}",
+        "method": "POST",
+        "url": "http://172.17.0.1:8089/register-face",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"name\": \"{{ $fromAI('name', 'The name of the person to register') }}\"}"
+      },
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        -288,
+        816
+      ],
+      "id": "4d22e705-62de-4a20-8219-1d8f827b75ff",
+      "name": "register_face"
+    },
+    {
+      "parameters": {
+        "model": "gpt-4.1-mini",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatAzureOpenAi",
+      "typeVersion": 1,
+      "position": [
+        -304,
+        560
+      ],
+      "id": "76a54a70-dff3-4406-83ab-f3f4818758c5",
+      "name": "Azure OpenAI Chat Model",
+      "credentials": {
+        "azureOpenAiApi": {
+          "id": "nbCVmGWMFIw3Ri8K",
+          "name": "Azure Open AI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "retrieve-as-tool",
+        "toolDescription": "Work with this data for database information",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.vectorStorePGVector",
+      "typeVersion": 1.3,
+      "position": [
+        272,
+        592
+      ],
+      "id": "af26a2f6-8a3b-4661-bb99-eb29f41f7c94",
+      "name": "Postgres PGVector Store",
+      "credentials": {
+        "postgres": {
+          "id": "m7fGi9bpyQYtd8a7",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.embeddingsAzureOpenAi",
+      "typeVersion": 1,
+      "position": [
+        272,
+        800
+      ],
+      "id": "3be2e7c0-1fb7-4bad-8d12-092c48276e86",
+      "name": "Embeddings Azure OpenAI",
+      "credentials": {
+        "azureOpenAiApi": {
+          "id": "9GGzmREjQvqUFuTj",
+          "name": "embeddings"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('To', ``, 'string') }}",
+        "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Subject', ``, 'string') }}",
+        "message": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Message', ``, 'string') }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmailTool",
+      "typeVersion": 2.1,
+      "position": [
+        96,
+        832
+      ],
+      "id": "222bd8a7-2b83-40b5-aa0a-5c1b0c6072d5",
+      "name": "Send a message in Gmail",
+      "webhookId": "fb1e7324-18e8-4269-a01c-c864e4a1a268",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "vqjX8UDXBoM1Ih6s",
+          "name": "Lynx · Google · ridwan"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('To', ``, 'string') }}",
+        "subject": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Subject', ``, 'string') }}",
+        "bodyContent": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Message', ``, 'string') }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.microsoftOutlookTool",
+      "typeVersion": 2,
+      "position": [
+        -80,
+        832
+      ],
+      "id": "d916416c-0340-4dd2-8b02-d1c6b7fdb1f2",
+      "name": "Send a message in Microsoft Outlook",
+      "webhookId": "93bf16b8-316a-4900-8bdb-823395b97b9e",
+      "credentials": {
+        "microsoftOutlookOAuth2Api": {
+          "id": "jJVAM5VMB6a4eujY",
+          "name": "Lynx · Microsoft · ridwan"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://192.168.137.100:8003/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"listening\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -976,
+        -80
+      ],
+      "id": "9fca7671-4400-4c37-a84a-115856e455a6",
+      "name": "Face: Listening",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://192.168.137.2:8004/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\"state\": \"echo\", \"text\": \"{{  $('ASR').first().json.body.text }}\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -560,
+        -48
+      ],
+      "id": "f7906b20-88ea-4d9e-9a7f-686f8e41d868",
+      "name": "Face: Echo",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://192.168.137.2:8004/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"thinking\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        48,
+        -96
+      ],
+      "id": "6636f6ae-9a88-4e71-ae36-d4d5d189f68d",
+      "name": "Face: Thinking",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://192.168.137.2:8004/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"idle\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        928,
+        224
+      ],
+      "id": "4eed9184-fbd4-4412-b949-79e072734525",
+      "name": "Face: Idle",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://192.168.137.2:8004/face/state",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"state\": \"speaking\"}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        688,
+        -64
+      ],
+      "id": "4e3df390-bd27-4ea5-9481-e34941204ab7",
+      "name": "Face: Speaking",
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ (() => { try { return $('ASR').first().json.body.text } catch(e) { try { return $('When chat message received').first().json.chatInput; } catch(e2) { return ''; } } })() }}",
+        "options": {
+          "systemMessage": "=You are Jarvis, an AI assistant for a senior design expo. You help attendees using real-time perception and connected knowledge tools. Give brief responses that are informative and natural. Avoid long rambling responses unless someone asks for more detail.\n\n---\n\nPERCEPTION\n\nYou have real-time vision. Your current scene and detected people are provided below in CURRENT CONTEXT. Use this proactively — greet people by name if recognized, and reference your surroundings naturally when appropriate.\n\n---\n\nTOOLS\n\nUse the available knowledge/search tools when needed.\n\n- faculty_search → questions about a specific person (faculty, staff, researchers, presenters)\n  input: {\"input\": \"search text\"}\n\n- knowledge_search → buildings, projects, schedules, programs, policies, expo information\n  input: {\"input\": \"search text\"}\n\n- register_face → when someone tells you their name or introduces themselves. Call immediately when you hear a name.\n  input: {\"name\": \"their name\"}\n\n- web_search → real-time web search for information not covered by local knowledge tools.\n  input: {\"query\": \"search query\"}\n\n- turn_head → physically move your head. Only call when explicitly asked (e.g. \"look left\", \"look up\", \"turn your head\"). Do not call proactively.\n  input: {\"pan\": <-1.0 to 1.0>, \"tilt\": <-1.0 to 1.0>, \"duration_s\": <seconds>}\n  pan:  -1.0 = full right,  0.0 = center,  1.0 = full left\n  tilt: -1.0 = full up,     0.0 = center,  1.0 = full down\n\n- move_arm → physically move your arm joints. Only call when explicitly asked (e.g. \"wave\", \"point\", \"extend your arm\"). Do not call proactively.\n  input: {\"base\": <-1..1>, \"shoulder\": <-1..1>, \"elbow\": <-1..1>, \"wrist_tilt\": <-1..1>, \"duration_s\": <seconds>}\n  Omit any joint to leave it in place.\n\nIf both person + topic are mentioned → call both faculty_search and knowledge_search.\n\nNever combine a motor tool (turn_head, move_arm) with another tool in the same response.\n\n---\n\nRULES\n\n- Use they/them for unknown gender.\n- Do not invent information. If uncertain, say you are unsure.\n- If tools do not answer the question: \"I’m not sure. Try checking the event organizers or official website directly.\"\n- Offer \"Want more details?\" for complex topics.\n- After calling register_face, always use the exact text in the \"suggest_reply\" field of the response as your reply — do not paraphrase it.\n- For turn_head and move_arm: only call when the user explicitly requests a physical movement. Confirm with a short sentence after (e.g. \"Done.\" or \"Looking left.\")\n- Keep motions slow and controlled around people.\n- Avoid multi-paragraph responses unless explicitly requested.\n\n---\n\nCURRENT CONTEXT\n\nTime:     {{ $json.current_time || 'unknown' }}\nDay:      {{ $json.day_of_week || 'unknown' }}\nLocation: {{ $json.location || 'Unknown' }}\nPeople:   {{ JSON.stringify($json.faces || []) }}\nScene:    {{ $json.scene_caption || $json.scene_memo || 'No scene data.' }}\n{{ $json.personalization_context || '' }}"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        -128,
+        224
+      ],
+      "id": "c93a2e1c-1ff3-45df-8c95-1909f885730a",
+      "name": "LLM",
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://obituaries-rev-jacksonville-python.trycloudflare.com/v1/audio/speech ",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ {\n  model: \"kokoro\",\n  input: ($json.output ?? \"\").replace(/\\r?\\n|\\n/g, \"\").replace(/\\\\n/g, \"\"),\n  voice: \"af_heart\",\n  response_format: \"wav\",\n  speed: 1.2,\n  stream: true\n} }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        336,
+        224
+      ],
+      "id": "4b8193e8-f254-47da-a0e1-65df77de6125",
+      "name": "TTS",
+      "alwaysOutputData": true,
+      "executeOnce": false
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "asr-transcript",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -1024,
+        160
+      ],
+      "id": "3aebb720-2bc0-4a5d-b032-52dedb08fded",
+      "name": "ASR",
+      "webhookId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Move head. pan: -1=right, 1=left. tilt: -1=up, 1=down. Only call when explicitly asked.",
+        "method": "POST",
+        "url": "http://172.17.0.1:8000/head/turn",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "pan",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters0_Value', `Head turn left/right. -1.0 = full right, 0.0 = center, 1.0 = full left`, 'string') }}"
+            },
+            {
+              "name": "tilt",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters1_Value', `Head tilt up/down. -1.0 = full up, 0.0 = center, 1.0 = full down`, 'string') }}"
+            },
+            {
+              "name": "duration_s ",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters2_Value', `Seconds to complete the movement. Default 0.6. Use 1.0+ for slow deliberate turns`, 'string') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.3,
+      "position": [
+        432,
+        816
+      ],
+      "id": "6b0370e6-d2b9-4a12-b1eb-c77784a15d19",
+      "name": "turn_head"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Move arm joints. Omit any joint to leave it in place. Only call when explicitly asked.",
+        "method": "POST",
+        "url": "http://172.17.0.1:8000/arm/move",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "base",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters0_Value', `Arm base rotation (NOT head): -1=full left, 0=center, 1=full right`, 'string') }}"
+            },
+            {
+              "name": "shoulder",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters1_Value', `Arm shoulder lift: 1=up, 0=center, -1=down`, 'string') }}"
+            },
+            {
+              "name": "elbow",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters2_Value', `Arm elbow flex: 1=up, 0=center, -1=down`, 'string') }}"
+            },
+            {
+              "name": "wrist_tilt",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters3_Value', `Arm wrist tilt: -1=up, 0=center, 1=down`, 'string') }}"
+            },
+            {
+              "name": "duration_s",
+              "value": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('parameters4_Value', `Seconds to reach the target pose`, 'string') }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.3,
+      "position": [
+        624,
+        816
+      ],
+      "id": "74ea2257-8c01-4aa2-8d82-eacfdd0aac53",
+      "name": "move_arm"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Get Vision State": {
+      "main": [
+        [
+          {
+            "node": "Enrich with Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich with Time": {
+      "main": [
+        [
+          {
+            "node": "LLM",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Face: Thinking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "LLM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "register_face": {
+      "ai_tool": [
+        [
+          {
+            "node": "LLM",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Azure OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "LLM",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Postgres PGVector Store": {
+      "ai_tool": [
+        [
+          {
+            "node": "LLM",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Embeddings Azure OpenAI": {
+      "ai_embedding": [
+        [
+          {
+            "node": "Postgres PGVector Store",
+            "type": "ai_embedding",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message in Gmail": {
+      "ai_tool": [
+        [
+          {
+            "node": "LLM",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message in Microsoft Outlook": {
+      "ai_tool": [
+        [
+          {
+            "node": "LLM",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Face: Echo": {
+      "main": [
+        []
+      ]
+    },
+    "LLM": {
+      "main": [
+        [
+          {
+            "node": "TTS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "TTS": {
+      "main": [
+        [
+          {
+            "node": "Speaker",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Face: Speaking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ASR": {
+      "main": [
+        [
+          {
+            "node": "Get Vision State",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Face: Echo",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Speaker": {
+      "main": [
+        [
+          {
+            "node": "Face: Idle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "turn_head": {
+      "ai_tool": [
+        [
+          {
+            "node": "LLM",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "move_arm": {
+      "ai_tool": [
+        [
+          {
+            "node": "LLM",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "acb67bb2-7774-41aa-836f-b1e46cf38275",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "cf62c18d1d7d43f57771f2639fa7581d7f4995b1fc54b37462680c04da0cf259"
+  },
+  "id": "Qmayn2ggkaI4l2P0",
+  "tags": []
+}

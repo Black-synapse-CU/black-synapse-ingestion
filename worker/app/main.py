@@ -10,7 +10,7 @@ import logging
 from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 from dotenv import load_dotenv
 import httpx
 
@@ -23,15 +23,10 @@ import asyncio
 import uuid
 from datetime import datetime
 
-try:
-    from action_servos import ServoOrchestrator as _ServoOrchestrator
-    from action_servos.config import DEFAULT_I2C_BUS, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ
-    from .arm_actions import execute_action as _execute_arm_action
-    _SERVOS_AVAILABLE = True
-except ModuleNotFoundError:
-    _ServoOrchestrator = None  # type: ignore[assignment,misc]
-    _execute_arm_action = None  # type: ignore[assignment]
-    _SERVOS_AVAILABLE = False
+from action_servos import ServoOrchestrator as _ServoOrchestrator
+from action_servos.config import DEFAULT_I2C_BUS, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ
+from .arm_actions import execute_action as _execute_arm_action
+from robotic_arm.tools import turn_head as _turn_head
 
 # Load environment variables
 load_dotenv()
@@ -60,18 +55,14 @@ app.add_middleware(
 pipeline = IngestionPipeline()
 
 # Arm servo orchestrator — None if hardware unavailable (worker still starts cleanly)
-if _SERVOS_AVAILABLE:
-    _servo_bus = int(os.getenv("SERVO_I2C_BUS", str(DEFAULT_I2C_BUS)))
-    try:
-        _arm_orch = _ServoOrchestrator()
-        _arm_orch.open(_servo_bus, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ)
-        logger.info("Servo orchestrator opened on I2C bus %d", _servo_bus)
-    except Exception as _e:
-        _arm_orch = None
-        logger.warning("Servo hardware unavailable — /arm/action will return 503: %s", _e)
-else:
+_servo_bus = int(os.getenv("SERVO_I2C_BUS", str(DEFAULT_I2C_BUS)))
+try:
+    _arm_orch = _ServoOrchestrator()
+    _arm_orch.open(_servo_bus, DEFAULT_PCA9685_ADDRESS, DEFAULT_PWM_FREQUENCY_HZ)
+    logger.info("Servo orchestrator opened on I2C bus %d", _servo_bus)
+except Exception as _e:
     _arm_orch = None
-    logger.warning("action_servos module not found — /arm/action will return 503")
+    logger.warning("Servo hardware unavailable — /arm/action will return 503: %s", _e)
 
 # Service URLs for acknowledge endpoint
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
@@ -162,55 +153,13 @@ async def root():
     """Health check endpoint."""
     return {"message": "AtlasAI Worker - SPOT Robot AI System", "status": "healthy"}
 
-@app.get("/debug/ingest")
-async def debug_ingest(limit: int = 50):
-    """
-    Return a summary of all ingested documents.
-    Hit in browser: http://localhost:8000/debug/ingest
-    """
-    import psycopg2
-    from psycopg2.extras import RealDictCursor
-    try:
-        with psycopg2.connect(pipeline.postgres_url) as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT doc_id, source, title, uri, author,
-                           chunk_count, processed_at, is_deleted
-                    FROM documents
-                    WHERE is_deleted = FALSE
-                    ORDER BY processed_at DESC
-                    LIMIT %s
-                """, (limit,))
-                docs = [dict(r) for r in cur.fetchall()]
-
-                cur.execute("SELECT COUNT(*) AS total FROM documents WHERE is_deleted = FALSE")
-                total = cur.fetchone()["total"]
-
-                cur.execute("SELECT COUNT(*) AS total FROM document_chunks")
-                total_chunks = cur.fetchone()["total"]
-
-        return {
-            "total_documents": total,
-            "total_chunks": total_chunks,
-            "showing": len(docs),
-            "documents": docs,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/health")
 async def health_check():
-    """Detailed health check including database connections."""
-    try:
-        postgres_healthy = await pipeline.check_postgres_connection()
-
-        return {
-            "status": "healthy" if postgres_healthy else "unhealthy",
-            "postgres": "connected" if postgres_healthy else "disconnected",
-        }
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Health check failed: {str(e)}")
+    """Health check."""
+    return {
+        "status": "healthy",
+        "servos": "connected" if _arm_orch is not None else "unavailable",
+    }
 
 @app.post("/ingest", response_model=IngestionResponse)
 async def ingest_document(
@@ -587,7 +536,7 @@ class ArmActionRequest(BaseModel):
         None,
         ge=0,
         le=100,
-        description="For extend/retract: percentage 0–100. Omit for named gesture actions.",
+        description="For extend/retract: percentage 0–100. Omit to use the default (30% — a small, safe movement). Only go higher if the user explicitly asks for a large or full movement.",
     )
 
 
@@ -620,6 +569,178 @@ async def arm_action(request: ArmActionRequest):
     except Exception as e:
         logger.error("Arm action '%s' failed: %s", request.action, e)
         raise HTTPException(status_code=500, detail=f"Arm action failed: {e}")
+
+
+class HeadTurnRequest(BaseModel):
+    """Request schema for LLM-driven head movement."""
+    pan: Optional[float] = Field(None, ge=-1.0, le=1.0, description="Left/right turn: -1=full right, 0=center, 1=full left. Omit to keep current position.")
+    tilt: Optional[float] = Field(None, ge=-1.0, le=1.0, description="Up/down tilt: -1=full up, 0=center, 1=full down. Omit to keep current position.")
+    duration_s: float = Field(0.6, gt=0.0, description="Seconds to reach the target pose")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_empty_strings(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for k in ("pan", "tilt"):
+                if data.get(k) == "":
+                    data[k] = None
+            if data.get("duration_s") == "":
+                data["duration_s"] = 0.6
+        return data
+
+
+class HeadTurnResponse(BaseModel):
+    success: bool
+    result: str
+
+
+@app.post("/head/turn", response_model=HeadTurnResponse)
+async def head_turn(request: HeadTurnRequest):
+    """
+    Smoothly move the head to a pan/tilt position.
+
+    Called by the LLM via n8n toolHttpRequest. pan and tilt are normalised
+    -1..1 values. Hardware limits: pan 1000–2500 µs, tilt 1200–2500 µs,
+    center 1700 µs for both.
+    """
+    if _arm_orch is None:
+        raise HTTPException(status_code=503, detail="Servo hardware unavailable.")
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, _turn_head, _arm_orch, request.pan, request.tilt, request.duration_s
+        )
+        return HeadTurnResponse(success=True, result=result)
+    except Exception as e:
+        logger.error("Head turn failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Head turn failed: {e}")
+
+
+class ArmMoveRequest(BaseModel):
+    """Request schema for direct LLM-driven arm joint control."""
+    base: Optional[float] = Field(None, ge=-1.0, le=1.0, description="Arm base rotation (NOT head): -1=full left, 0=center, 1=full right. Use small increments (0.1–0.2) unless explicitly asked for a large movement.")
+    shoulder: Optional[float] = Field(None, ge=-1.0, le=1.0, description="Arm shoulder lift: -1=up, 0=center, 1=down. Use small increments (0.1–0.2) unless explicitly asked for a large movement.")
+    elbow: Optional[float] = Field(None, ge=-1.0, le=1.0, description="Arm elbow flex: -1=up, 0=center, 1=down. Use small increments (0.1–0.2) unless explicitly asked for a large movement.")
+    wrist_tilt: Optional[float] = Field(None, ge=-1.0, le=1.0, description="Arm wrist tilt: -1=up, 0=center, 1=down. Use small increments (0.1–0.2) unless explicitly asked for a large movement.")
+    duration_s: float = Field(0.8, gt=0.0, description="Seconds to reach the target pose")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_empty_strings(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            for k in ("base", "shoulder", "elbow", "wrist_tilt"):
+                if data.get(k) == "":
+                    data[k] = None
+            if data.get("duration_s") == "":
+                data["duration_s"] = 0.8
+        return data
+
+
+class ArmMoveResponse(BaseModel):
+    success: bool
+    result: str
+
+
+@app.post("/arm/move", response_model=ArmMoveResponse)
+async def arm_move(request: ArmMoveRequest):
+    """
+    Move one or more arm joints to normalized positions.
+
+    Called by the LLM via n8n toolHttpRequest. Any joint omitted stays at its
+    current position. All values are normalised -1..1.
+    """
+    if _arm_orch is None:
+        raise HTTPException(status_code=503, detail="Servo hardware unavailable.")
+    if all(v is None for v in (request.base, request.shoulder, request.elbow, request.wrist_tilt)):
+        raise HTTPException(status_code=400, detail="At least one joint must be specified: base, shoulder, elbow, or wrist_tilt.")
+
+    def _move() -> str:
+        from action_servos.groups import normalized_to_us
+        arm = _arm_orch.arm
+        L = _arm_orch.layout
+        s = arm.last_state
+
+        base_us     = normalized_to_us(L.base,       request.base)      if request.base     is not None else (s.base     or L.base.center_us)
+        shoulder_us = normalized_to_us(L.shoulder_a, -request.shoulder) if request.shoulder is not None else (s.shoulder or L.shoulder_a.center_us)
+        elbow_us    = normalized_to_us(L.elbow,      -request.elbow)    if request.elbow    is not None else (s.elbow    or L.elbow.center_us)
+
+        arm.move_ramp(base_us, shoulder_us, elbow_us, duration_s=request.duration_s, steps=30)
+
+        if request.wrist_tilt is not None and L.wrist_tilt is not None:
+            wt_us = normalized_to_us(L.wrist_tilt, request.wrist_tilt)
+            arm.set_wrist_tilt(wt_us)
+
+        parts = []
+        if request.base       is not None: parts.append(f"base={request.base:+.2f}")
+        if request.shoulder   is not None: parts.append(f"shoulder={request.shoulder:+.2f}")
+        if request.elbow      is not None: parts.append(f"elbow={request.elbow:+.2f}")
+        if request.wrist_tilt is not None: parts.append(f"wrist_tilt={request.wrist_tilt:+.2f}")
+        return f"Arm moved: {', '.join(parts)}."
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _move)
+        return ArmMoveResponse(success=True, result=result)
+    except Exception as e:
+        logger.error("Arm move failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Arm move failed: {e}")
+
+
+class ArmSequenceRequest(BaseModel):
+    """Ordered list of arm moves to execute in sequence."""
+    steps: List[ArmMoveRequest] = Field(..., min_length=1, description="Ordered list of arm moves")
+
+
+class ArmSequenceResponse(BaseModel):
+    success: bool
+    steps_executed: int
+    result: str
+
+
+@app.post("/arm/sequence", response_model=ArmSequenceResponse)
+async def arm_sequence(request: ArmSequenceRequest):
+    """
+    Execute multiple arm moves in order, one after the other.
+
+    Called by the LLM via n8n toolHttpRequest when a motion requires several
+    steps (e.g. raise arm, extend, lower). Each step runs to completion before
+    the next starts.
+    """
+    if _arm_orch is None:
+        raise HTTPException(status_code=503, detail="Servo hardware unavailable.")
+
+    def _run_sequence() -> str:
+        from action_servos.groups import normalized_to_us
+        arm = _arm_orch.arm
+        L = _arm_orch.layout
+        summaries = []
+
+        for step in request.steps:
+            if all(v is None for v in (step.base, step.shoulder, step.elbow, step.wrist_tilt)):
+                continue
+            s = arm.last_state
+            base_us     = normalized_to_us(L.base,       step.base)      if step.base     is not None else (s.base     or L.base.center_us)
+            shoulder_us = normalized_to_us(L.shoulder_a, -step.shoulder) if step.shoulder is not None else (s.shoulder or L.shoulder_a.center_us)
+            elbow_us    = normalized_to_us(L.elbow,      -step.elbow)    if step.elbow    is not None else (s.elbow    or L.elbow.center_us)
+            arm.move_ramp(base_us, shoulder_us, elbow_us, duration_s=step.duration_s, steps=30)
+            if step.wrist_tilt is not None and L.wrist_tilt is not None:
+                arm.set_wrist_tilt(normalized_to_us(L.wrist_tilt, step.wrist_tilt))
+            parts = []
+            if step.base       is not None: parts.append(f"base={step.base:+.2f}")
+            if step.shoulder   is not None: parts.append(f"shoulder={step.shoulder:+.2f}")
+            if step.elbow      is not None: parts.append(f"elbow={step.elbow:+.2f}")
+            if step.wrist_tilt is not None: parts.append(f"wrist_tilt={step.wrist_tilt:+.2f}")
+            summaries.append(f"[{', '.join(parts)}]")
+
+        return " → ".join(summaries)
+
+    try:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _run_sequence)
+        return ArmSequenceResponse(success=True, steps_executed=len(request.steps), result=result)
+    except Exception as e:
+        logger.error("Arm sequence failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"Arm sequence failed: {e}")
 
 
 class AcknowledgeRequest(BaseModel):

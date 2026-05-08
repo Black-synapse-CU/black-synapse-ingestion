@@ -99,7 +99,7 @@ def execute_action(orch: ServoOrchestrator, action: str, amount: int | None) -> 
         return "Arm moved to neutral / home position."
 
     elif action == "extend":
-        pct = amount if amount is not None else 100
+        pct = amount if amount is not None else 30
         t = max(0.0, min(1.0, pct / 100.0))
         Sequence().add(
             _pose(orch,
@@ -111,7 +111,7 @@ def execute_action(orch: ServoOrchestrator, action: str, amount: int | None) -> 
         return f"Extended arm to {pct}%."
 
     elif action == "retract":
-        pct = amount if amount is not None else 100
+        pct = amount if amount is not None else 30
         t = max(0.0, min(1.0, pct / 100.0))
         Sequence().add(
             _pose(orch,
