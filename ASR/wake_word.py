@@ -85,7 +85,7 @@ def record_after_wake():
         openwakeword.utils.download_models()
 
         # Available models: "alexa", "hey_jarvis", "hey_mycroft", "hey_porcupine", "hey_rhasspy", "hey_spot", "hey_raven", "timer"
-        # Using "hey_jarvis" as it's closest to "Jarvis"
+        # Using "hey atlas" as the wake word
         oww_model = Model(wakeword_models=["hey jarvis"],)
         wake_word_name = "hey jarvis"
     except Exception as e:
@@ -97,7 +97,7 @@ def record_after_wake():
     
     try:
         stream.start()
-        print("[Listening for wake word 'hey jarvis']")
+        print("[Listening for wake word 'hey atlas']")
         
         last_detection_time = 0.0  # Track when last wake word was detected
         cooldown_frames_to_flush = int(COOLDOWN_SECONDS * SAMPLE_RATE / OWW_FRAME_LENGTH)  # Frames to flush during cooldown

@@ -21,13 +21,13 @@ log = logging.getLogger("perception")
 app = FastAPI(title="Perception Vision Service")
 
 # ── Tunables ──────────────────────────────────────────────────────────
-CAM_INDEX = int(os.getenv("CAM_INDEX", "1"))
+CAM_INDEX = int(os.getenv("CAM_INDEX", "0"))
 WIDTH = int(os.getenv("CAM_WIDTH", "1920"))
 HEIGHT = int(os.getenv("CAM_HEIGHT", "1080"))
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "90"))
 CAPTURE_FPS = int(os.getenv("CAPTURE_FPS", "15"))
 
-CHANGE_THRESHOLD = float(os.getenv("CHANGE_THRESHOLD", "30.0"))
+CHANGE_THRESHOLD = float(os.getenv("CHANGE_THRESHOLD", "20.0"))
 CHANGE_CHECK_INTERVAL = float(os.getenv("CHANGE_CHECK_INTERVAL", "1.0"))
 MIN_PUSH_INTERVAL = float(os.getenv("MIN_PUSH_INTERVAL", "3.0"))
 
@@ -45,11 +45,9 @@ QR_STREAM_OVERLAY = os.getenv("QR_STREAM_OVERLAY", "true").lower() == "true"
 # DeepFace stream mode: when true, stream runs face analysis + identification (heavy).
 # When false, uses simple capture loop — inference only via n8n Perception workflow.
 DEEPFACE_STREAM = os.getenv("DEEPFACE_STREAM", "true").lower() == "true"
-STREAM_FRAME_THRESHOLD = int(os.getenv("STREAM_FRAME_THRESHOLD", "1"))
-STREAM_TIME_THRESHOLD = int(os.getenv("STREAM_TIME_THRESHOLD", "5"))
 # Decoupled DeepFace mode: capture/composer runs at PREVIEW_FPS; analysis runs every ANALYSIS_INTERVAL.
-PREVIEW_FPS = int(os.getenv("PREVIEW_FPS", "30"))
-ANALYSIS_INTERVAL = float(os.getenv("ANALYSIS_INTERVAL", "0.12"))
+PREVIEW_FPS = int(os.getenv("PREVIEW_FPS", "60"))
+ANALYSIS_INTERVAL = float(os.getenv("ANALYSIS_INTERVAL", "0.033"))
 # Distant faces produce small boxes (pixels); the old default 130 filtered most of them out.
 FACE_MIN_WIDTH = int(os.getenv("FACE_MIN_WIDTH", "48"))
 # DeepFace detector backends: yunet (fast DNN), opencv (Haar cascade), retinaface, mtcnn, ssd, mediapipe, ...
@@ -94,6 +92,10 @@ _embeddings_lock = threading.Lock()
 # TensorFlow/Keras (DeepFace) is not safe for concurrent inference across threads; without
 # this, /identify + background stream can segfault or exit with no Python traceback.
 _deepface_lock = threading.Lock()
+
+# In-memory embeddings cache — invalidated by mtime on write
+_embeddings_cache: Optional[dict] = None
+_embeddings_cache_mtime: float = 0.0
 
 # Redis (optional, used when STATE_BACKEND=redis)
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -146,7 +148,6 @@ _latest_raw: Optional[np.ndarray] = None
 # Overlay drawn on every preview frame (updated by analysis thread).
 _overlay_lock = threading.Lock()
 _overlay_faces: list = []
-_overlay_countdown: Optional[str] = None
 
 
 def _empty_vision_state() -> dict:
@@ -275,30 +276,43 @@ def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 def _load_embeddings() -> dict:
     """
-    Load embedding db. Format: { user_1: { embeddings: [[...], [...], ...], first_seen: ts }, ... }.
+    Load embedding db from memory cache; reloads from disk only when file changes.
+    Format: { user_1: { embeddings: [[...], ...], first_seen: ts }, ... }.
     Migrates legacy single-embedding format to embeddings list.
     """
+    global _embeddings_cache, _embeddings_cache_mtime
     p = Path(EMBEDDINGS_PATH)
-    if not p.exists():
+    try:
+        mtime = p.stat().st_mtime
+    except FileNotFoundError:
         return {}
+    if _embeddings_cache is not None and mtime <= _embeddings_cache_mtime:
+        return _embeddings_cache
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return {}
-        # Migrate legacy format
         for uid, entry in data.items():
             if isinstance(entry, dict) and "embedding" in entry and "embeddings" not in entry:
                 entry["embeddings"] = [entry.pop("embedding", [])]
+        _embeddings_cache = data
+        _embeddings_cache_mtime = mtime
         return data
     except Exception as exc:
         log.warning("Failed to load embeddings: %s", exc)
-        return {}
+        return _embeddings_cache or {}
 
 
 def _save_embeddings(data: dict):
+    global _embeddings_cache, _embeddings_cache_mtime
     p = Path(EMBEDDINGS_PATH)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    _embeddings_cache = data
+    try:
+        _embeddings_cache_mtime = p.stat().st_mtime
+    except Exception:
+        pass
 
 
 def _match_embedding(emb: np.ndarray, add_if_unknown: bool = True) -> Tuple[str, float]:
@@ -311,18 +325,32 @@ def _match_embedding(emb: np.ndarray, add_if_unknown: bool = True) -> Tuple[str,
     best_sim = 0.0
     emb = np.asarray(emb, dtype=np.float64)
 
+    emb_norm = np.linalg.norm(emb)
+    if emb_norm < 1e-9:
+        emb_norm = 1e-9
+    emb_unit = emb / emb_norm
+
     for user_id, entry in db.items():
         emb_list = entry.get("embeddings", entry.get("embedding", []))
         if not isinstance(emb_list, list):
             emb_list = [emb_list]
-        for stored_raw in emb_list:
-            stored = np.array(stored_raw, dtype=np.float64)
-            if len(stored) != len(emb):
+        if not emb_list:
+            continue
+        try:
+            stored = np.array(emb_list, dtype=np.float64)
+            if stored.ndim == 1:
+                stored = stored.reshape(1, -1)
+            if stored.shape[1] != len(emb):
                 continue
-            sim = _cosine_similarity(emb, stored)
-            if sim > best_sim and sim >= SIMILARITY_THRESHOLD:
-                best_sim = sim
-                best_id = user_id
+            norms = np.linalg.norm(stored, axis=1, keepdims=True)
+            norms[norms < 1e-9] = 1e-9
+            sims = (stored / norms) @ emb_unit
+            max_sim = float(np.max(sims))
+        except Exception:
+            continue
+        if max_sim > best_sim and max_sim >= SIMILARITY_THRESHOLD:
+            best_sim = max_sim
+            best_id = user_id
 
     if best_id is not None:
         entry = db[best_id]
@@ -488,7 +516,12 @@ def _open_camera() -> cv2.VideoCapture:
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, HEIGHT)
     for _ in range(5):
-        cap.read()
+        try:
+            ret, _ = cap.read()
+            if not ret:
+                break
+        except cv2.error:
+            pass
         time.sleep(0.02)
     log.info("Camera opened: index=%d, %dx%d", CAM_INDEX, WIDTH, HEIGHT)
     return cap
@@ -533,29 +566,13 @@ def _grab_facial_areas(
         return []
 
 
-def _draw_overlay(img: np.ndarray, faces_data: list, countdown: Optional[str] = None):
-    """Draw bounding boxes and labels on frame."""
+def _draw_overlay(img: np.ndarray, faces_data: list):
+    """Draw bounding boxes and name labels on frame."""
     for (x, y, w, h), data in faces_data:
-        color = (67, 67, 67)
-        cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
-        label_parts = []
-        if data.get("arming"):
-            label_parts.append(str(data["arming"]))
+        cv2.rectangle(img, (x, y), (x + w, y + h), (67, 67, 67), 2)
         if data.get("name"):
-            label_parts.append(f"{data['name']} ({data.get('confidence', 0):.0%})")
-        if data.get("emotion"):
-            label_parts.append(data["emotion"])
-        if data.get("age"):
-            label_parts.append(f"{int(data['age'])}y")
-        if data.get("gender"):
-            label_parts.append(data["gender"][:1])
-        if label_parts:
-            label = " | ".join(label_parts)
+            label = f"{data['name']} ({data.get('confidence', 0):.0%})"
             cv2.putText(img, label, (x, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
-    if countdown:
-        h, w = img.shape[:2]
-        cv2.rectangle(img, (10, 10), (90, 50), (67, 67, 67), -1)
-        cv2.putText(img, countdown, (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
 
 def _smooth_capture_loop():
@@ -581,12 +598,13 @@ def _smooth_capture_loop_inner():
             continue
         with _raw_lock:
             _latest_raw = raw.copy()
-        composed = raw.copy()
         with _overlay_lock:
             faces_snapshot = [(box, dict(info)) for box, info in _overlay_faces]
-            cd = _overlay_countdown
-        if faces_snapshot or cd:
-            _draw_overlay(composed, faces_snapshot, cd)
+        if faces_snapshot:
+            composed = raw.copy()
+            _draw_overlay(composed, faces_snapshot)
+        else:
+            composed = raw
         with _buf.lock:
             _buf.frame = composed
             _buf.timestamp = time.time()
@@ -602,17 +620,11 @@ def _deepface_stream_loop():
 
 
 def _deepface_analysis_loop_inner():
-    global _overlay_faces, _overlay_countdown
+    global _overlay_faces
     df = _get_deepface()
     if df is None:
         return
     detector_backend = DEEPFACE_DETECTOR_BACKEND
-    frame_threshold = max(STREAM_FRAME_THRESHOLD, 1)
-    time_threshold = max(STREAM_TIME_THRESHOLD, 1)
-    arm_count = 0
-    in_hold = False
-    hold_tic = 0.0
-    last_faces_data: list = []
     analysis_sleep = max(ANALYSIS_INTERVAL, 0.02)
 
     while not _shutdown_event.is_set():
@@ -622,110 +634,25 @@ def _deepface_analysis_loop_inner():
         if snap is None:
             continue
 
-        now = time.time()
-        if in_hold and (now - hold_tic < time_threshold):
-            time_left = int(time_threshold - (now - hold_tic) + 1)
+        faces_coords = _grab_facial_areas(snap, detector_backend)
+        if not faces_coords:
             with _overlay_lock:
-                _overlay_faces = [(box, dict(info)) for box, info in last_faces_data]
-                _overlay_countdown = str(time_left)
+                _overlay_faces = []
             continue
 
-        if in_hold and (now - hold_tic >= time_threshold):
-            in_hold = False
-            arm_count = 0
-            log.info("DeepFace smooth: hold released")
-            with _overlay_lock:
-                _overlay_countdown = None
+        faces_data = []
+        for (x, y, w, h) in faces_coords:
+            detected_face = snap[y : y + h, x : x + w]
+            name, confidence = _identify_by_embedding(detected_face, add_if_unknown=True)
+            faces_data.append(((x, y, w, h), {"name": name, "confidence": confidence}))
 
-        faces_coords = _grab_facial_areas(snap, detector_backend)
-        if faces_coords:
-            arm_count += 1
-        else:
-            arm_count = 0
-
-        trigger = (
-            arm_count > 0
-            and arm_count % frame_threshold == 0
-            and faces_coords
-        )
-        if trigger:
-            faces_data = []
-            for (x, y, w, h) in faces_coords:
-                detected_face = snap[y : y + h, x : x + w]
-                name, confidence = _identify_by_embedding(
-                    detected_face, add_if_unknown=True
-                )
-                emotion, age, gender = "neutral", None, None
-                try:
-                    with _deepface_lock:
-                        dem = df.analyze(
-                            detected_face,
-                            actions=("age", "gender", "emotion"),
-                            detector_backend="skip",
-                            enforce_detection=False,
-                            silent=True,
-                        )
-                    if dem and len(dem) > 0:
-                        d = dem[0]
-                        emotion = d.get("dominant_emotion", "neutral")
-                        age = d.get("age")
-                        gender = (d.get("dominant_gender") or "unknown")[:1]
-                except Exception as exc:
-                    log.debug("Demography failed: %s", exc)
-                faces_data.append(
-                    (
-                        (x, y, w, h),
-                        {
-                            "name": name,
-                            "confidence": confidence,
-                            "emotion": emotion,
-                            "age": age,
-                            "gender": gender,
-                        },
-                    )
-                )
-            last_faces_data = faces_data
-            state_faces = [
-                {
-                    "name": d["name"],
-                    "emotion": d.get("emotion"),
-                    "age": d.get("age"),
-                    "gender": d.get("gender"),
-                    "confidence": d.get("confidence", 0),
-                }
-                for _, d in faces_data
-            ]
-            _write_stream_face_file({"faces": state_faces})
-            in_hold = True
-            hold_tic = now
-            arm_count = 0
-            log.info("DeepFace smooth: analyzed %d face(s)", len(faces_data))
-            with _overlay_lock:
-                _overlay_faces = [(box, dict(info)) for box, info in faces_data]
-                _overlay_countdown = None
-        else:
-            overlay = []
-            if faces_coords:
-                rem = frame_threshold - (arm_count % frame_threshold)
-                count_str = str(rem)
-                for (x, y, w, h) in faces_coords:
-                    overlay.append(
-                        (
-                            (x, y, w, h),
-                            {
-                                "name": "",
-                                "confidence": 0.0,
-                                "emotion": "",
-                                "age": None,
-                                "gender": "",
-                                "arming": count_str,
-                            },
-                        )
-                    )
-            with _overlay_lock:
-                _overlay_faces = overlay
-                if not in_hold:
-                    _overlay_countdown = None
+        state_faces = [
+            {"name": d["name"], "confidence": d.get("confidence", 0)}
+            for _, d in faces_data
+        ]
+        _write_stream_face_file({"faces": state_faces})
+        with _overlay_lock:
+            _overlay_faces = [(box, dict(info)) for box, info in faces_data]
 
 
 def _simple_capture_loop(fps: int = CAPTURE_FPS):
@@ -796,6 +723,8 @@ def _frame_diff(a: np.ndarray, b: np.ndarray) -> float:
 
 # ── QR code detector (created once, reused across threads) ───────────
 _qr_detector = cv2.QRCodeDetector()
+_last_qr_hits: List[Tuple[str, Optional[np.ndarray]]] = []
+_last_qr_lock = threading.Lock()
 
 
 def _scan_qr_all(bgr: np.ndarray) -> List[Tuple[str, Optional[np.ndarray]]]:
@@ -842,6 +771,7 @@ def _draw_qr_hits_on_bgr(vis: np.ndarray, hits: List[Tuple[str, Optional[np.ndar
 
 def _qr_scan_loop():
     """Background: detect QR codes in the live frame and update state.location."""
+    global _last_qr_hits
     interval = max(QR_SCAN_INTERVAL, 0.2)
     while not _shutdown_event.is_set():
         try:
@@ -850,6 +780,8 @@ def _qr_scan_loop():
             if frame is not None:
                 hits = _scan_qr_all(frame)
                 _persist_location_from_qr_hits(hits)
+                with _last_qr_lock:
+                    _last_qr_hits = hits
         except Exception:
             log.exception("QR scan loop error")
         time.sleep(interval)
@@ -869,11 +801,9 @@ def startup_event():
         threading.Thread(target=_smooth_capture_loop, daemon=True, name="capture-smooth").start()
         threading.Thread(target=_deepface_stream_loop, daemon=True, name="deepface-analyze").start()
         log.info(
-            "Smooth preview %d FPS + DeepFace analysis every %.3fs (arm=%d ticks, hold=%ds)",
+            "Smooth preview %d FPS + DeepFace analysis every %.3fs",
             PREVIEW_FPS,
             ANALYSIS_INTERVAL,
-            STREAM_FRAME_THRESHOLD,
-            STREAM_TIME_THRESHOLD,
         )
     elif DEEPFACE_STREAM:
         log.warning("DEEPFACE_STREAM enabled but DeepFace unavailable — using simple capture")
@@ -1255,10 +1185,10 @@ def _mjpeg_generator(fps: int, quality: int):
             frame = _buf.frame
         if frame is not None:
             to_encode = frame
-            if QR_SCAN_ENABLED:
-                hits = _scan_qr_all(frame)
-                _persist_location_from_qr_hits(hits)
-                if QR_STREAM_OVERLAY and hits:
+            if QR_SCAN_ENABLED and QR_STREAM_OVERLAY:
+                with _last_qr_lock:
+                    hits = list(_last_qr_hits)
+                if hits:
                     to_encode = frame.copy()
                     _draw_qr_hits_on_bgr(to_encode, hits)
             jpg = _encode_jpeg(to_encode, quality)

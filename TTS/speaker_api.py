@@ -19,10 +19,23 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+
+import numpy as np
+import openai
 import sounddevice as sd
 import soundfile as sf
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+OPENAI_TTS_MODEL = os.environ.get("OPENAI_TTS_MODEL", "tts-1")
+OPENAI_TTS_VOICE = os.environ.get("OPENAI_TTS_VOICE", "alloy")
+# OpenAI PCM stream: 24 kHz, 16-bit mono
+_TTS_SAMPLE_RATE = 24000
+_TTS_CHUNK_BYTES = _TTS_SAMPLE_RATE * 2 // 20  # 50 ms chunks
 
 SUPPORTED_SUFFIXES = {".wav", ".mp3"}
 SUPPORTED_MIME_TYPES = {
@@ -226,6 +239,77 @@ async def play_audio(
 
     background_tasks.add_task(_background_play, stored_path, play_id)
     return JSONResponse({"status": "playing", "epoch": epoch, "play_id": play_id})
+
+
+class SpeakRequest(BaseModel):
+    text: str
+    epoch: int
+    voice: str = OPENAI_TTS_VOICE
+    model: str = OPENAI_TTS_MODEL
+
+
+def _stream_and_play(text: str, voice: str, model: str, play_id: str) -> None:
+    """Stream OpenAI TTS PCM directly to the audio device, playing as chunks arrive."""
+    _stop_event.clear()
+    client = openai.OpenAI(api_key=os.environ["OPEN_AI_KEY"])
+
+    t_start = time.perf_counter()
+    t_first_chunk: Optional[float] = None
+
+    try:
+        with sd.OutputStream(
+            samplerate=_TTS_SAMPLE_RATE,
+            channels=1,
+            dtype="float32",
+            device=AUDIO_DEVICE,
+        ) as stream:
+            with client.audio.speech.with_streaming_response.create(
+                model=model,
+                voice=voice,
+                input=text,
+                response_format="pcm",
+            ) as response:
+                buf = b""
+                for raw in response.iter_bytes(_TTS_CHUNK_BYTES):
+                    if t_first_chunk is None:
+                        t_first_chunk = time.perf_counter()
+                        logging.info(f"[TTS] first chunk in {t_first_chunk - t_start:.3f}s")
+                    with _state_lock:
+                        still_current = (_current_play_id == play_id)
+                    if not still_current or _stop_event.is_set():
+                        return
+                    buf += raw
+                    while len(buf) >= _TTS_CHUNK_BYTES:
+                        pcm = buf[:_TTS_CHUNK_BYTES]
+                        buf = buf[_TTS_CHUNK_BYTES:]
+                        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+                        stream.write(audio.reshape(-1, 1))
+                if buf and len(buf) >= 2:
+                    audio = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+                    stream.write(audio.reshape(-1, 1))
+        logging.info(f"[TTS] done in {time.perf_counter() - t_start:.3f}s total")
+    except Exception as e:
+        logging.error(f"[stream_and_play] {e}")
+
+
+@app.post("/speak")
+async def speak(body: SpeakRequest, background_tasks: BackgroundTasks):
+    """
+    Accepts text + epoch, streams OpenAI TTS PCM to the audio device in real-time.
+    First audio chunk plays in ~400-600 ms. Respects epoch for barge-in protection.
+    """
+    global _current_play_id
+    with _state_lock:
+        if body.epoch != _current_epoch:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Stale request (epoch={body.epoch}, current={_current_epoch}).",
+            )
+        play_id = uuid.uuid4().hex
+        _current_play_id = play_id
+
+    background_tasks.add_task(_stream_and_play, body.text, body.voice, body.model, play_id)
+    return JSONResponse({"status": "streaming", "play_id": play_id})
 
 
 if __name__ == "__main__":
