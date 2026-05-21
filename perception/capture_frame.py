@@ -21,7 +21,7 @@ log = logging.getLogger("perception")
 app = FastAPI(title="Perception Vision Service")
 
 # ── Tunables ──────────────────────────────────────────────────────────
-CAM_INDEX = int(os.getenv("CAM_INDEX", "0"))
+CAM_INDEX = int(os.getenv("CAM_INDEX", "4"))
 WIDTH = int(os.getenv("CAM_WIDTH", "1920"))
 HEIGHT = int(os.getenv("CAM_HEIGHT", "1080"))
 JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "90"))
@@ -138,6 +138,8 @@ class FrameBuffer:
 
 _buf = FrameBuffer()
 _cap: Optional[cv2.VideoCapture] = None
+_rs_pipeline = None  # pyrealsense2.pipeline when RealSense is active
+_use_realsense: bool = False
 _cap_lock = threading.Lock()
 _shutdown_event = threading.Event()
 
@@ -527,6 +529,71 @@ def _open_camera() -> cv2.VideoCapture:
     return cap
 
 
+def _init_realsense():
+    """Try to start a RealSense pipeline for RGB-only capture. Returns pipeline or None."""
+    try:
+        import pyrealsense2 as rs
+    except ImportError:
+        return None
+    try:
+        ctx = rs.context()
+        if len(ctx.query_devices()) == 0:
+            log.info("No RealSense device found — using webcam")
+            return None
+        pipeline = rs.pipeline()
+        cfg = rs.config()
+        cfg.enable_stream(rs.stream.color, WIDTH, HEIGHT, rs.format.bgr8, min(CAPTURE_FPS, 30))
+        pipeline.start(cfg)
+        # Warm up: discard a few initial frames
+        for _ in range(5):
+            try:
+                pipeline.wait_for_frames(timeout_ms=500)
+            except Exception:
+                break
+        log.info("RealSense initialized: %dx%d @ %d FPS (RGB only)", WIDTH, HEIGHT, min(CAPTURE_FPS, 30))
+        return pipeline
+    except Exception as exc:
+        log.warning("RealSense init failed (%s) — falling back to webcam", exc)
+        return None
+
+
+def _init_capture():
+    """Initialize RealSense if available, otherwise open the webcam. Updates module globals."""
+    global _cap, _rs_pipeline, _use_realsense
+    rs_pipe = _init_realsense()
+    if rs_pipe is not None:
+        with _cap_lock:
+            _rs_pipeline = rs_pipe
+            _use_realsense = True
+    else:
+        _use_realsense = False
+        _cap = _open_camera()
+
+
+def grab_frame() -> Optional[np.ndarray]:
+    """Return the latest RGB frame as a BGR NumPy array from whichever capture device is active."""
+    if _use_realsense:
+        with _cap_lock:
+            pipeline = _rs_pipeline
+        if pipeline is None:
+            return None
+        try:
+            frames = pipeline.wait_for_frames(timeout_ms=200)
+            color_frame = frames.get_color_frame()
+            if not color_frame:
+                return None
+            return np.asanyarray(color_frame.get_data()).copy()
+        except Exception as exc:
+            log.debug("RealSense frame grab failed: %s", exc)
+            return None
+    with _cap_lock:
+        cap = _cap
+    if cap is None or not cap.isOpened():
+        return None
+    ok, frame = cap.read()
+    return frame if ok and frame is not None else None
+
+
 def _encode_jpeg(frame: np.ndarray, quality: int = JPEG_QUALITY) -> Optional[bytes]:
     ok, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
     return jpg.tobytes() if ok else None
@@ -587,13 +654,8 @@ def _smooth_capture_loop_inner():
     global _latest_raw
     interval = 1.0 / max(PREVIEW_FPS, 1)
     while not _shutdown_event.is_set():
-        with _cap_lock:
-            cap = _cap
-        if cap is None or not cap.isOpened():
-            time.sleep(interval)
-            continue
-        ok, raw = cap.read()
-        if not ok or raw is None:
+        raw = grab_frame()
+        if raw is None:
             time.sleep(interval)
             continue
         with _raw_lock:
@@ -666,13 +728,8 @@ def _simple_capture_loop(fps: int = CAPTURE_FPS):
 def _simple_capture_loop_inner(fps: int = CAPTURE_FPS):
     interval = 1.0 / fps
     while not _shutdown_event.is_set():
-        with _cap_lock:
-            cap = _cap
-        if cap is None or not cap.isOpened():
-            time.sleep(interval)
-            continue
-        ret, frame = cap.read()
-        if ret and frame is not None:
+        frame = grab_frame()
+        if frame is not None:
             with _buf.lock:
                 _buf.frame = frame
                 _buf.timestamp = time.time()
@@ -790,9 +847,11 @@ def _qr_scan_loop():
 # ── Lifecycle ─────────────────────────────────────────────────────────
 @app.on_event("startup")
 def startup_event():
-    global _cap
-    _cap = _open_camera()
-    if not _cap.isOpened():
+    _init_capture()
+    cap_ready = (_use_realsense and _rs_pipeline is not None) or (
+        not _use_realsense and _cap is not None and _cap.isOpened()
+    )
+    if not cap_ready:
         log.error("Camera unavailable at startup — frame buffer will be empty until /reopen succeeds")
     Path(FACES_DB_PATH).mkdir(parents=True, exist_ok=True)
     _get_deepface()
@@ -847,9 +906,15 @@ def startup_event():
 
 @app.on_event("shutdown")
 def shutdown_event():
-    global _cap
+    global _cap, _rs_pipeline
     _shutdown_event.set()
     with _cap_lock:
+        if _rs_pipeline is not None:
+            try:
+                _rs_pipeline.stop()
+            except Exception:
+                pass
+            _rs_pipeline = None
         if _cap is not None:
             _cap.release()
             _cap = None
@@ -1133,17 +1198,26 @@ def health():
         "analysis_interval_s": ANALYSIS_INTERVAL if DEEPFACE_STREAM else None,
         "face_min_width": FACE_MIN_WIDTH,
         "deepface_detector_backend": DEEPFACE_DETECTOR_BACKEND,
+        "realsense": _use_realsense,
     }
 
 
 @app.post("/reopen")
 def reopen():
-    """Re-initialise the camera."""
-    global _cap
+    """Re-initialise the camera (RealSense or webcam)."""
+    global _cap, _rs_pipeline, _use_realsense
     with _cap_lock:
+        if _rs_pipeline is not None:
+            try:
+                _rs_pipeline.stop()
+            except Exception:
+                pass
+            _rs_pipeline = None
         if _cap is not None:
             _cap.release()
-        _cap = _open_camera()
+            _cap = None
+        _use_realsense = False
+    _init_capture()
     return {"reopened": True}
 
 
