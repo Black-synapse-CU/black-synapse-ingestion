@@ -1,2 +1,0 @@
-# Jetson / Linux I2C for PCA9685 servo driver
-smbus2>=0.4.0
